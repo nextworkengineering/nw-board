@@ -423,3 +423,42 @@ test("a merge Backfilled from earlier today counts toward the MVP", async () => 
     count: 1,
   });
 });
+
+test("a Monday-morning boot still backfills the Feed's last 24h from before the week started", async () => {
+  // Monday noon local: the week began hours ago, so most of the Feed's 24h window
+  // sits in last week. Derived from local midnight so the gap holds in any timezone.
+  const MONDAY = Date.parse("2026-08-24T17:00:00Z");
+  const beforeTheWeek = new Date(MONDAY).setHours(0, 0, 0, 0) - HOUR;
+  const api = await stubGitHubApi(
+    onlyProjectsApp(
+      [],
+      [
+        {
+          number: 9,
+          title: "Merged on Sunday",
+          updated_at: new Date(beforeTheWeek).toISOString(),
+          merged_at: new Date(beforeTheWeek).toISOString(),
+          user: { login: "author-alice" },
+        },
+      ],
+    ),
+  );
+
+  running = await startServer(0, {
+    configPath,
+    now: () => MONDAY,
+    githubApiBase: api.base,
+  });
+
+  const snapshot = await connectAndReadSnapshot(running!.port);
+  expect(snapshot.feed).toEqual([
+    {
+      type: "pr-merged",
+      repo: "example-org/projects-app",
+      number: 9,
+      title: "Merged on Sunday",
+      actor: "author-alice",
+      at: beforeTheWeek,
+    },
+  ]);
+});

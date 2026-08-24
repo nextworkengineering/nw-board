@@ -742,6 +742,13 @@ function ready() {
   } catch {
     return false;
   }
+  // A context built before the Pi had an audio sink (a cold boot races the HDMI
+  // sink, and forcing the display mode re-registers it) starts suspended and stays
+  // that way: it is built once, and a TV never gets the pointerdown that would
+  // unstick it. So ask on every sound. The event that finds it suspended is still
+  // lost, but the next one plays instead of the board going quiet until someone
+  // reboots it.
+  if (audio.state === "suspended") audio.resume().catch(() => {});
   return audio.state === "running";
 }
 
