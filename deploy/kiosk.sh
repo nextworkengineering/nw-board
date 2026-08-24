@@ -61,6 +61,22 @@ if command -v unclutter >/dev/null 2>&1; then
   unclutter -idle 0 &
 fi
 
+# Chromium picks its audio output device once, at startup, and never re-picks. The
+# mode change above re-negotiates HDMI, which drops and re-registers the sink — and
+# on a deploy-triggered restart the server is already up, so the wait above returns
+# instantly and Chromium can beat the sink back. Losing that race is silent: the
+# board renders perfectly and never makes a sound again until the kiosk restarts.
+# Best-effort, like the mode force — a Pi without pactl just carries on.
+if command -v pactl >/dev/null 2>&1; then
+  for _ in $(seq 1 20); do
+    if [ -n "$(pactl list short sinks 2>/dev/null)" ]; then break; fi
+    sleep 1
+  done
+  if [ -z "$(pactl list short sinks 2>/dev/null)" ]; then
+    echo "kiosk: no audio sink after 20s; the board will be silent" >&2
+  fi
+fi
+
 CHROMIUM="$(command -v chromium-browser || command -v chromium || true)"
 if [ -z "$CHROMIUM" ]; then
   echo "no chromium-browser/chromium on PATH" >&2
