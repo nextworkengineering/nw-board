@@ -445,6 +445,8 @@ fi
 if [[ -n "$(_existing GITHUB_TOKEN || true)" ]]; then
   say ""
   ok "a GITHUB_TOKEN is already configured — just press Enter to keep it"
+  note "if the board never names who's in dev, this token predates that feature:"
+  note "add Repository permissions → Actions: Read-only to it and restart"
 else
   say ""
   say "Now a fine-grained PAT, so the display can Backfill open PRs on boot:"
@@ -454,6 +456,7 @@ else
   step "Repository permissions → Metadata: Read-only (it's mandatory)"
   step "Repository permissions → Pull requests: Read-only"
   step "Repository permissions → Issues: Read-only  (PR comments are issue comments)"
+  step "Repository permissions → Actions: Read-only  (who last deployed to dev)"
   step "Generate token, then copy it."
 fi
 ask_secret GITHUB_TOKEN "Paste a token (input hidden; Enter keeps current / skips):"
