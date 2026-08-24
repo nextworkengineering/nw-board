@@ -17,6 +17,7 @@ import {
   Text,
   Texture,
 } from "./vendor/pixi.min.mjs";
+import { play, resumeAudio } from "./audio.js";
 
 // The scene is authored at 1080p and scaled to fit whatever the TV reports, so the
 // layout is fixed numbers rather than a responsive system nobody will ever resize.
@@ -728,103 +729,8 @@ function stepParticles(pieces, delta, gravity = 0.18) {
   }
 }
 
-// --------------------------------------------------------------------------------
-// Sound: 8-bit jingles built from oscillators. Every one is under 3 seconds.
-// The kiosk has no user gesture to unblock audio, so Chromium is launched with
-// --autoplay-policy=no-user-gesture-required. Anywhere else the context stays
-// suspended (or missing) and playback is skipped rather than throwing.
-// --------------------------------------------------------------------------------
-
-let audio;
-function ready() {
-  try {
-    audio ??= new AudioContext();
-  } catch {
-    return false;
-  }
-  // A context built before the Pi had an audio sink (a cold boot races the HDMI
-  // sink, and forcing the display mode re-registers it) starts suspended and stays
-  // that way: it is built once, and a TV never gets the pointerdown that would
-  // unstick it. So ask on every sound. The event that finds it suspended is still
-  // lost, but the next one plays instead of the board going quiet until someone
-  // reboots it.
-  if (audio.state === "suspended") audio.resume().catch(() => {});
-  return audio.state === "running";
-}
-
-function tone(freq, start, length, { type = "square", gain = 0.1, slideTo } = {}) {
-  const at = audio.currentTime + start;
-  const oscillator = audio.createOscillator();
-  const volume = audio.createGain();
-  oscillator.type = type;
-  oscillator.frequency.setValueAtTime(freq, at);
-  if (slideTo) oscillator.frequency.exponentialRampToValueAtTime(slideTo, at + length);
-  volume.gain.setValueAtTime(gain, at);
-  // Fade each note out; a hard stop on a square wave clicks.
-  volume.gain.exponentialRampToValueAtTime(0.001, at + length);
-  oscillator.connect(volume).connect(audio.destination);
-  oscillator.start(at);
-  oscillator.stop(at + length);
-}
-
-/** White noise through a decaying envelope: the 8-bit "sparkle"/percussion voice. */
-function noise(start, length, gain = 0.07) {
-  const frames = Math.ceil(audio.sampleRate * length);
-  const buffer = audio.createBuffer(1, frames, audio.sampleRate);
-  const samples = buffer.getChannelData(0);
-  for (let i = 0; i < frames; i++)
-    samples[i] = (Math.random() * 2 - 1) * (1 - i / frames) ** 2;
-  const source = audio.createBufferSource();
-  source.buffer = buffer;
-  const volume = audio.createGain();
-  volume.gain.value = gain;
-  source.connect(volume).connect(audio.destination);
-  source.start(audio.currentTime + start);
-}
-
-const JINGLES = {
-  // Victory fanfare: rising arpeggio into a held octave, with a sparkle on the hit.
-  "pr-merged": () => {
-    [523, 659, 784, 1047].forEach((freq, i) => tone(freq, i * 0.09, 0.1));
-    tone(1047, 0.36, 0.5, { gain: 0.12 });
-    tone(1568, 0.36, 0.5, { type: "triangle", gain: 0.07 });
-    tone(2093, 0.9, 0.6, { type: "triangle", gain: 0.06 });
-    noise(0.36, 0.35, 0.05);
-  },
-  // Approval: a two-note stab plus a triangle shimmer — same family, clearly not a merge.
-  "review-approved": () => {
-    tone(784, 0, 0.12, { gain: 0.11 });
-    tone(1175, 0.12, 0.32, { gain: 0.11 });
-    [1175, 1568].forEach((freq, i) =>
-      tone(freq, 0.16 + i * 0.1, 0.28, { type: "triangle", gain: 0.06 }),
-    );
-    noise(0, 0.12, 0.04);
-  },
-  // Day Chime: triangle "bells", slower and softer, nothing like a celebration.
-  "day-chime": () => {
-    [659, 880, 1319, 880].forEach((freq, i) =>
-      tone(freq, i * 0.28, 0.7, { type: "triangle", gain: 0.09 }),
-    );
-    tone(330, 0.84, 1.2, { type: "triangle", gain: 0.05 });
-  },
-};
-
-// Recorded clips beat synthesis for anything with a voice in it. Drop the file in
-// and it wins; a missing file or blocked playback falls back to the jingle above.
-const SAMPLES = {
-  "pr-merged": "sounds/another-one.mp3",
-  "review-approved": "sounds/bomboclaat.mp3",
-};
-
-function play(name, teammate = true) {
-  const fallback = () => {
-    if (ready()) JINGLES[name]?.();
-  };
-  if (!SAMPLES[name] || !teammate) return fallback();
-  const clip = new Audio(SAMPLES[name]);
-  clip.volume = 0.8;
-  clip.play().catch(fallback);
-}
+// Sound lives in audio.js so its asynchronous autoplay/device recovery path can
+// be tested without booting Pixi. Every generated jingle is under three seconds.
 
 // --------------------------------------------------------------------------------
 // Celebration takeovers. Queued: two merges landing together play one after the
@@ -1261,7 +1167,7 @@ const sample = (type) => ({
 // board off with no console. Audio needs one click/tap (browser autoplay rules);
 // the resume listener below turns that first click into sound for the rest.
 if (location.search.includes("demo")) setTimeout(() => window.arcade.demo(), 1500);
-addEventListener("pointerdown", () => audio?.resume?.(), { once: true });
+addEventListener("pointerdown", () => resumeAudio(), { once: true });
 
 window.arcade = {
   app, // arcade.app.ticker.stop() / .update(t) steps an animation frame by frame
