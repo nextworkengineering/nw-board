@@ -311,8 +311,9 @@ export async function startServer(port: number, options: Options = {}) {
 
   /**
    * Backfill: rebuild the Feed from the GitHub API so a fresh boot is never blank and
-   * downtime leaves no gap. Fetches back to the start of the week (not just the Feed's
-   * 24h) so the dedup set knows every event a webhook might redeliver from this week.
+   * downtime leaves no gap. Fetches back to the start of the week or the last 24h,
+   * whichever is further, so the dedup set knows every event a webhook might redeliver
+   * from this week and the Feed gets its whole window even on a Monday morning.
    * Any failure is logged and skipped — live webhooks still work without it.
    */
   async function backfill() {
@@ -324,7 +325,11 @@ export async function startServer(port: number, options: Options = {}) {
       return;
     }
     const apiBase = options.githubApiBase ?? "https://api.github.com";
-    const weekStart = startOfWeek(now());
+    // How far back to fetch: far enough for both windows Backfill serves. The dedup
+    // set spans the week, but the Feed spans the last 24h — and early in the week the
+    // week is younger than that, so a Monday-morning boot fetching only back to Monday
+    // 00:00 leaves the Feed blank for everything the weekend still owes it.
+    const since = Math.min(startOfWeek(now()), now() - DAY_MS);
     const entries: { at: number; event: DomainEvent }[] = [];
 
     /** GET a list under /repos, e.g. "owner/name/pulls?state=open". */
@@ -354,7 +359,7 @@ export async function startServer(port: number, options: Options = {}) {
             actor: login(pr.user),
           },
         });
-        if (Date.parse(pr.updated_at) >= weekStart) active.push(pr);
+        if (Date.parse(pr.updated_at) >= since) active.push(pr);
       }
       // Closed PRs come back newest-updated first, so we can stop at the first one
       // that predates the week.
@@ -363,10 +368,10 @@ export async function startServer(port: number, options: Options = {}) {
       for (const pr of await get(
         `${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100`,
       )) {
-        if (Date.parse(pr.updated_at) < weekStart) break;
+        if (Date.parse(pr.updated_at) < since) break;
         active.push(pr);
         const mergedAt = pr.merged_at ? Date.parse(pr.merged_at) : 0;
-        if (mergedAt >= weekStart)
+        if (mergedAt >= since)
           entries.push({
             at: mergedAt,
             event: {
@@ -393,7 +398,7 @@ export async function startServer(port: number, options: Options = {}) {
         }
         for (const review of reviews) {
           const at = Date.parse(review.submitted_at);
-          if (review.state !== "APPROVED" || !(at >= weekStart)) continue;
+          if (review.state !== "APPROVED" || !(at >= since)) continue;
           entries.push({
             at,
             event: {
@@ -478,16 +483,24 @@ export async function startServer(port: number, options: Options = {}) {
       // map is the roster, so an unmapped login (a bot, an outside contributor) is
       // not someone we play a sample for.
       const teammate = Object.hasOwn(names, event.actor);
+      // Read once: the broadcast below must not re-ask a clock that may have ticked
+      // past soundEnd since this line, or the log and the board disagree.
+      const audible = soundAllowed();
+      // A Celebration that reaches the board silently looks exactly like one that
+      // never arrived, so name which gate decided the sound.
+      const sound = !CELEBRATIONS.has(event.type)
+        ? ""
+        : ` sound=${!audible ? "silent (quiet hours)" : teammate ? "clip" : "jingle (actor not on the roster)"}`;
       const recorded = recordEvent(event);
       console.log(
-        `webhook ${delivery}: ${recorded ? "recorded" : "repeat, dropped"} ${event.type} ${event.repo}#${event.number}`,
+        `webhook ${delivery}: ${recorded ? "recorded" : "repeat, dropped"} ${event.type} ${event.repo}#${event.number}${sound}`,
       );
       // null = repeat of something already recorded (e.g. Backfill got there
       // first): no state change, so nothing to tell the displays.
       if (recorded) {
         broadcast(
           CELEBRATIONS.has(event.type)
-            ? { ...event, audible: soundAllowed(), teammate }
+            ? { ...event, audible, teammate }
             : event,
         );
         // Any event can change today's MVP (and an open/merged/closed also moves the
