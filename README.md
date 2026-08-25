@@ -80,7 +80,9 @@ Because it's untracked, edit it in place on whatever machine runs the board;
 template on a fresh clone and reads the Tracked Repo list back out of it.
 
 Event sounds: the board plays `public/sounds/another-one.mp3` (the DJ Khaled clip)
-on a merge and `public/sounds/bomboclaat.mp3` on an approval. Neither file is in
+on a merge, `public/sounds/bomboclaat.mp3` on an approval, and
+`public/sounds/oh-my-gosh.mp3` and `public/sounds/super-mario-end.mp3` on the
+start- and end-of-day chimes. None of them are in
 git — drop them there yourself; without one the board falls back to that event's
 8-bit jingle. Clips only play for people on the `names` map — a bot or an unmapped
 login gets the jingle, so adding a teammate to the map is what opts them in.
