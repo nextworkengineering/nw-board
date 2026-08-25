@@ -30,11 +30,11 @@ afterEach(async () => {
 });
 
 /** A stand-in GitHub API: `handler` answers each request, `requests` records them. */
-async function stubGitHubApi(handler: (url: string) => unknown) {
+async function stubGitHubApi(handler: (url: string) => unknown | Promise<unknown>) {
   const requests: { url: string; authorization?: string }[] = [];
-  const server = createServer((req, res) => {
+  const server = createServer(async (req, res) => {
     requests.push({ url: req.url!, authorization: req.headers.authorization });
-    const body = handler(req.url!);
+    const body = await handler(req.url!);
     if (typeof body === "number") {
       res.writeHead(body);
       res.end("no");
@@ -49,6 +49,15 @@ async function stubGitHubApi(handler: (url: string) => unknown) {
   stubs.push(server);
   const { port } = server.address() as AddressInfo;
   return { base: `http://127.0.0.1:${port}`, requests };
+}
+
+/** Reserve an ephemeral port, then release it for a startup-order assertion. */
+async function unusedPort() {
+  const server = createServer();
+  await new Promise<void>((listening) => server.listen(0, "127.0.0.1", listening));
+  const { port } = server.address() as AddressInfo;
+  await new Promise<void>((closed) => server.close(() => closed()));
+  return port;
 }
 
 const start = (githubApiBase: string) =>
@@ -115,6 +124,37 @@ test("a display connecting right after boot receives a snapshot of the backfille
     },
   ]);
   expect(api.requests[0]!.authorization).toContain("test-pat");
+});
+
+test("the webhook endpoint listens while startup Backfill is still running", async () => {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const api = await stubGitHubApi(async () => {
+    await blocked;
+    return [];
+  });
+  const port = await unusedPort();
+  const starting = startServer(port, {
+    configPath,
+    now: () => NOW,
+    githubApiBase: api.base,
+  });
+
+  // Backfill is deliberately stuck on its first API response. The static endpoint
+  // must already answer, or GitHub would see 502 for the whole startup crawl.
+  let reachable = false;
+  for (let attempt = 0; attempt < 20 && !reachable; attempt++) {
+    await sleep(10);
+    reachable = await fetch(`http://127.0.0.1:${port}`)
+      .then((response) => response.ok)
+      .catch(() => false);
+  }
+  expect(reachable).toBe(true);
+
+  release();
+  running = await starting;
 });
 
 const mergedEvent = {
@@ -461,4 +501,41 @@ test("a Monday-morning boot still backfills the Feed's last 24h from before the 
       at: beforeTheWeek,
     },
   ]);
+});
+
+test("a merge whose webhook failed is recovered while the server stays up", async () => {
+  let closed: unknown[] = [];
+  const api = await stubGitHubApi(onlyProjectsApp([], closed));
+  running = await startServer(0, {
+    configPath,
+    now: () => NOW,
+    githubApiBase: api.base,
+    reconcileMs: 10,
+  });
+
+  // GitHub attempted this webhook while Funnel returned 502. Its API state changes,
+  // but the board receives no POST and must discover the merge by reconciliation.
+  closed.push({
+    number: 77,
+    title: "Merge while the board was unreachable",
+    updated_at: ago(HOUR),
+    merged_at: ago(HOUR),
+    user: { login: "loheth" },
+  });
+  await sleep(100);
+
+  expect((await connectAndReadSnapshot(running.port)).feed).toContainEqual({
+    type: "pr-merged",
+    repo: "example-org/projects-app",
+    number: 77,
+    title: "Merge while the board was unreachable",
+    actor: "loheth",
+    at: NOW - HOUR,
+  });
+
+  // Multiple polls must not duplicate the recovered event.
+  await sleep(50);
+  expect(
+    (await connectAndReadSnapshot(running.port)).feed.filter((event: any) => event.number === 77),
+  ).toHaveLength(1);
 });

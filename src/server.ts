@@ -90,6 +90,8 @@ type Options = {
   githubApiBase?: string;
   /** How often the Day Chime scheduler checks the clock. */
   tickMs?: number;
+  /** How often to reconcile merges whose webhook could not reach the board. */
+  reconcileMs?: number;
 };
 
 /** Monday 00:00 local time of the week containing `at` — the dedup window. */
@@ -309,6 +311,21 @@ export async function startServer(port: number, options: Options = {}) {
   });
   wss.on("connection", (socket) => socket.send(JSON.stringify(snapshot())));
 
+  const token = process.env.GITHUB_TOKEN;
+  const apiBase = options.githubApiBase ?? "https://api.github.com";
+  /** GET a list under /repos, e.g. "owner/name/pulls?state=open". */
+  const get = async (path: string) => {
+    const response = await fetch(`${apiBase}/repos/${path}`, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/vnd.github+json",
+      },
+    });
+    if (!response.ok)
+      throw new Error(`GitHub API ${response.status} for ${path}`);
+    return (await response.json()) as any;
+  };
+
   /**
    * Backfill: rebuild the Feed from the GitHub API so a fresh boot is never blank and
    * downtime leaves no gap. Fetches back to the start of the week or the last 24h,
@@ -317,33 +334,18 @@ export async function startServer(port: number, options: Options = {}) {
    * Any failure is logged and skipped — live webhooks still work without it.
    */
   async function backfill() {
-    const token = process.env.GITHUB_TOKEN;
     if (!token) {
       console.warn(
         "GITHUB_TOKEN is not set: skipping Backfill, the board will fill from live webhooks only",
       );
       return;
     }
-    const apiBase = options.githubApiBase ?? "https://api.github.com";
     // How far back to fetch: far enough for both windows Backfill serves. The dedup
     // set spans the week, but the Feed spans the last 24h — and early in the week the
     // week is younger than that, so a Monday-morning boot fetching only back to Monday
     // 00:00 leaves the Feed blank for everything the weekend still owes it.
     const since = Math.min(startOfWeek(now()), now() - DAY_MS);
     const entries: { at: number; event: DomainEvent }[] = [];
-
-    /** GET a list under /repos, e.g. "owner/name/pulls?state=open". */
-    const get = async (path: string) => {
-      const response = await fetch(`${apiBase}/repos/${path}`, {
-        headers: {
-          authorization: `Bearer ${token}`,
-          accept: "application/vnd.github+json",
-        },
-      });
-      if (!response.ok)
-        throw new Error(`GitHub API ${response.status} for ${path}`);
-      return (await response.json()) as any;
-    };
 
     const backfillRepo = async (repo: string) => {
       // PRs touched this week, whose reviews may hold this week's approvals.
@@ -438,6 +440,59 @@ export async function startServer(port: number, options: Options = {}) {
       recordEvent(event, at);
   }
 
+  /**
+   * GitHub does not retry a repository webhook that received a 502. Poll only the
+   * cheap closed-PR list between full Backfills so those merges repair themselves
+   * while the process stays up. Dedup makes every successful webhook win the race;
+   * this path records only the misses and refreshes the board without replaying a
+   * stale celebration sound.
+   */
+  let reconciling = false;
+  async function reconcileMerges() {
+    if (!token || reconciling) return;
+    reconciling = true;
+    let recovered = 0;
+    const since = now() - DAY_MS;
+    try {
+      for (const repo of trackedRepos) {
+        let pulls: any[];
+        try {
+          pulls = await get(`${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100`);
+        } catch (error) {
+          console.warn(`Reconcile failed for ${repo}: ${error}`);
+          continue;
+        }
+        // The API returns newest-updated first. Record oldest-first so simultaneous
+        // recovered merges retain their real order in the Feed.
+        const merges = pulls
+          .filter((pr) => pr.merged_at && Date.parse(pr.merged_at) >= since)
+          .sort((a, b) => Date.parse(a.merged_at) - Date.parse(b.merged_at));
+        for (const pr of merges)
+          if (
+            recordEvent(
+              {
+                type: "pr-merged",
+                repo,
+                number: pr.number,
+                title: pr.title,
+                // The list endpoint has no merged_by. This is the same honest
+                // author stand-in used by startup Backfill.
+                actor: login(pr.user),
+              },
+              Date.parse(pr.merged_at),
+            )
+          )
+            recovered++;
+      }
+      if (recovered) {
+        console.log(`reconcile: recovered ${recovered} missed merge${recovered === 1 ? "" : "s"}`);
+        broadcast(snapshot());
+      }
+    } finally {
+      reconciling = false;
+    }
+  }
+
   app.post("/webhook", express.raw({ type: "*/*", limit: "5mb" }), (req, res) => {
     if (!Buffer.isBuffer(req.body)) {
       res.sendStatus(401);
@@ -517,8 +572,21 @@ export async function startServer(port: number, options: Options = {}) {
     res.sendStatus(err.status ?? 400);
   }) satisfies ErrorRequestHandler);
 
+  // Listen before Backfill. A deploy or crash restart must not make GitHub's webhook
+  // endpoint return 502 for the whole API crawl; displays that connect in this brief
+  // window receive the completed snapshot as soon as Backfill finishes.
+  await new Promise<void>((resolve) => http.listen(port, resolve));
   await backfill().catch((error) =>
     console.warn(`Backfill failed, serving live events only: ${error}`),
+  );
+  broadcast(snapshot());
+
+  const reconciliation = setInterval(
+    () =>
+      void reconcileMerges().catch((error) =>
+        console.warn(`Reconcile failed: ${error}`),
+      ),
+    options.reconcileMs ?? 60_000,
   );
 
   // Day Chime scheduler: poll the clock rather than compute a delay, so the injected
@@ -545,12 +613,12 @@ export async function startServer(port: number, options: Options = {}) {
     broadcast({ type: "day-chime", at: hhmm });
   }, options.tickMs ?? 30_000);
 
-  await new Promise<void>((resolve) => http.listen(port, resolve));
   return {
     port: (http.address() as AddressInfo).port,
     close: () =>
       new Promise<void>((resolve) => {
         clearInterval(scheduler);
+        clearInterval(reconciliation);
         for (const client of wss.clients) client.terminate();
         http.close(() => resolve());
       }),
