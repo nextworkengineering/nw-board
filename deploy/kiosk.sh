@@ -61,19 +61,28 @@ if command -v unclutter >/dev/null 2>&1; then
   unclutter -idle 0 &
 fi
 
-# Chromium picks its audio output device once, at startup, and never re-picks. The
-# mode change above re-negotiates HDMI, which drops and re-registers the sink — and
-# on a deploy-triggered restart the server is already up, so the wait above returns
-# instantly and Chromium can beat the sink back. Losing that race is silent: the
-# board renders perfectly and never makes a sound again until the kiosk restarts.
-# Best-effort, like the mode force — a Pi without pactl just carries on.
+# Chromium picks the current default audio output once at startup. Raspberry Pi OS
+# can make its internal mailbox/fallback device the default even while the TV's HDMI
+# sink is present, which sends a healthy audio stream somewhere nobody can hear it.
+# The mode change above can also drop and re-register HDMI briefly. Wait specifically
+# for HDMI, select and unmute it, and only then launch Chromium. Best-effort, like the
+# mode force — a Pi without pactl just carries on.
 if command -v pactl >/dev/null 2>&1; then
+  AUDIO_SINK=""
   for _ in $(seq 1 20); do
-    if [ -n "$(pactl list short sinks 2>/dev/null)" ]; then break; fi
+    AUDIO_SINK="$(pactl list short sinks 2>/dev/null | awk '$2 ~ /hdmi/ { print $2; exit }')"
+    if [ -n "$AUDIO_SINK" ]; then break; fi
     sleep 1
   done
-  if [ -z "$(pactl list short sinks 2>/dev/null)" ]; then
-    echo "kiosk: no audio sink after 20s; the board will be silent" >&2
+  if [ -z "$AUDIO_SINK" ]; then
+    echo "kiosk: no HDMI audio sink after 20s; available sinks:" >&2
+    pactl list short sinks >&2 || true
+  else
+    pactl set-default-sink "$AUDIO_SINK" ||
+      echo "kiosk: could not select HDMI audio sink $AUDIO_SINK" >&2
+    pactl set-sink-mute "$AUDIO_SINK" 0 ||
+      echo "kiosk: could not unmute HDMI audio sink $AUDIO_SINK" >&2
+    echo "kiosk: using audio sink $AUDIO_SINK"
   fi
 fi
 
