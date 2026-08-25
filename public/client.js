@@ -1019,9 +1019,9 @@ const ambient = (type) => AMBIENT[type]?.();
 
 /** Day Chime: a banner sweeps across the marquee line and the bell plays. */
 function chime(at = "") {
-  play("day-chime");
   const scene = new Container();
   const endOfDay = at === "17:00";
+  play(endOfDay ? "day-chime" : "day-start");
   // Headline stays arcade; the practical call-to-action rides beneath it.
   const headline = endOfDay
     ? `${at}  GAME OVER — GREAT RUN TEAM`

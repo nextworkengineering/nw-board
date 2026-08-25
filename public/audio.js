@@ -1,6 +1,13 @@
 // Browser audio for the board. Kept separate from the Pixi scene so the async
 // autoplay/device recovery path can be exercised without starting a renderer.
 
+function dayChime(tone) {
+  [659, 880, 1319, 880].forEach((freq, i) =>
+    tone(freq, i * 0.28, 0.7, { type: "triangle", gain: 0.09 }),
+  );
+  tone(330, 0.84, 1.2, { type: "triangle", gain: 0.05 });
+}
+
 const JINGLE_NOTES = {
   "pr-merged": (tone, noise) => {
     [523, 659, 784, 1047].forEach((freq, i) => tone(freq, i * 0.09, 0.1));
@@ -17,17 +24,16 @@ const JINGLE_NOTES = {
     );
     noise(0, 0.12, 0.04);
   },
-  "day-chime": (tone) => {
-    [659, 880, 1319, 880].forEach((freq, i) =>
-      tone(freq, i * 0.28, 0.7, { type: "triangle", gain: 0.09 }),
-    );
-    tone(330, 0.84, 1.2, { type: "triangle", gain: 0.05 });
-  },
+  "day-chime": dayChime,
+  // Start of day has its own clip; without the file it falls back to the same bell.
+  "day-start": dayChime,
 };
 
 const SAMPLES = {
   "pr-merged": "sounds/another-one.mp3",
   "review-approved": "sounds/bomboclaat.mp3",
+  "day-start": "sounds/oh-my-gosh.mp3",
+  "day-chime": "sounds/super-mario-end.mp3",
 };
 
 /**

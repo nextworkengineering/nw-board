@@ -86,3 +86,19 @@ test("a playable recorded clip does not create a synthesis context", async () =>
   expect(clip.volume).toBe(0.8);
   expect(AudioContext).not.toHaveBeenCalled();
 });
+
+test.for([
+  ["day-start", "sounds/oh-my-gosh.mp3"],
+  ["day-chime", "sounds/super-mario-end.mp3"],
+])("the %s clip falls back to the bell when the file is missing", async ([name, file]) => {
+  const { AudioContext, starts } = audioContext("suspended");
+  const Audio = vi.fn(function Audio() {
+    return { volume: 1, play: vi.fn().mockRejectedValue(new Error("404")) };
+  });
+  const player = createAudioPlayer({ AudioContext, Audio, warn: vi.fn() });
+
+  await expect(player.play(name)).resolves.toBe(true);
+
+  expect(Audio).toHaveBeenCalledWith(file);
+  expect(starts.length).toBeGreaterThan(0);
+});
