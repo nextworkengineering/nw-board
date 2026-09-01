@@ -539,3 +539,54 @@ test("a merge whose webhook failed is recovered while the server stays up", asyn
     (await connectAndReadSnapshot(running.port)).feed.filter((event: any) => event.number === 77),
   ).toHaveLength(1);
 });
+
+test("an approval whose webhook failed is recovered while the server stays up", async () => {
+  const MINUTE = 60 * 1000;
+  const open: unknown[] = [];
+  const reviews: unknown[] = [];
+  const api = await stubGitHubApi((url) => {
+    if (!url.includes("/example-org/projects-app/")) return [];
+    if (url.includes("/pulls/88/reviews")) return reviews;
+    if (url.includes("state=open")) return open;
+    return [];
+  });
+  running = await startServer(0, {
+    configPath,
+    now: () => NOW,
+    githubApiBase: api.base,
+    reconcileMs: 10,
+  });
+
+  // GitHub attempted the pull_request_review webhook while Funnel returned 502.
+  // The review bumped the PR's updated_at, which is what reconciliation keys on.
+  open.push({
+    number: 88,
+    title: "Approved while the board was unreachable",
+    created_at: ago(3 * HOUR),
+    updated_at: ago(10 * MINUTE),
+    user: { login: "author-alice" },
+  });
+  reviews.push({
+    state: "APPROVED",
+    submitted_at: ago(10 * MINUTE),
+    user: { login: "reviewer-rita" },
+  });
+  await sleep(100);
+
+  expect((await connectAndReadSnapshot(running.port)).feed).toContainEqual({
+    type: "review-approved",
+    repo: "example-org/projects-app",
+    number: 88,
+    title: "Approved while the board was unreachable",
+    actor: "reviewer-rita",
+    at: NOW - 10 * MINUTE,
+  });
+
+  // Multiple polls must not duplicate the recovered event.
+  await sleep(50);
+  expect(
+    (await connectAndReadSnapshot(running.port)).feed.filter(
+      (event: any) => event.type === "review-approved" && event.number === 88,
+    ),
+  ).toHaveLength(1);
+});
