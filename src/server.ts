@@ -441,23 +441,31 @@ export async function startServer(port: number, options: Options = {}) {
   }
 
   /**
-   * GitHub does not retry a repository webhook that received a 502. Poll only the
-   * cheap closed-PR list between full Backfills so those merges repair themselves
+   * GitHub does not retry a repository webhook that received a 502. Poll the cheap
+   * PR lists between full Backfills so missed merges and approvals repair themselves
    * while the process stays up. Dedup makes every successful webhook win the race;
    * this path records only the misses and refreshes the board without replaying a
    * stale celebration sound.
    */
   let reconciling = false;
-  async function reconcileMerges() {
+  async function reconcile() {
     if (!token || reconciling) return;
     reconciling = true;
     let recovered = 0;
     const since = now() - DAY_MS;
+    // A lost pull_request_review delivery leaves no trace here, but submitting a
+    // review bumps the PR's updated_at — so only recently-touched PRs need their
+    // reviews refetched.
+    // ponytail: 30-minute lookback keeps this to a couple of requests per tick; a
+    // delivery lost longer ago than that waits for the next restart's Backfill.
+    const reviewSince = now() - 30 * 60_000;
     try {
       for (const repo of trackedRepos) {
         let pulls: any[];
+        let open: any[];
         try {
           pulls = await get(`${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100`);
+          open = await get(`${repo}/pulls?state=open&per_page=100`);
         } catch (error) {
           console.warn(`Reconcile failed for ${repo}: ${error}`);
           continue;
@@ -483,9 +491,36 @@ export async function startServer(port: number, options: Options = {}) {
             )
           )
             recovered++;
+        for (const pr of [...open, ...pulls]) {
+          if (!(Date.parse(pr.updated_at) >= reviewSince)) continue;
+          let reviews: any[];
+          try {
+            reviews = await get(`${repo}/pulls/${pr.number}/reviews`);
+          } catch (error) {
+            console.warn(`Reconcile skipped reviews for ${repo}#${pr.number}: ${error}`);
+            continue;
+          }
+          for (const review of reviews) {
+            const at = Date.parse(review.submitted_at);
+            if (review.state !== "APPROVED" || !(at >= since)) continue;
+            if (
+              recordEvent(
+                {
+                  type: "review-approved",
+                  repo,
+                  number: pr.number,
+                  title: pr.title,
+                  actor: login(review.user),
+                },
+                at,
+              )
+            )
+              recovered++;
+          }
+        }
       }
       if (recovered) {
-        console.log(`reconcile: recovered ${recovered} missed merge${recovered === 1 ? "" : "s"}`);
+        console.log(`reconcile: recovered ${recovered} missed event${recovered === 1 ? "" : "s"}`);
         broadcast(snapshot());
       }
     } finally {
@@ -583,7 +618,7 @@ export async function startServer(port: number, options: Options = {}) {
 
   const reconciliation = setInterval(
     () =>
-      void reconcileMerges().catch((error) =>
+      void reconcile().catch((error) =>
         console.warn(`Reconcile failed: ${error}`),
       ),
     options.reconcileMs ?? 60_000,
