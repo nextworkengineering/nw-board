@@ -31,6 +31,22 @@ GITHUB_WEBHOOK_SECRET=dev npm start   # http://localhost:3000
 npm test   # vitest, covers webhook handling, backfill, MVP, sound rules
 ```
 
+## Brand tokens
+
+Colors come from the NextWork brand kernel, pinned as the `kernel/` git
+submodule and compiled into `public/kernel-tokens.gen.js` (committed, so the
+Pi never needs the submodule). After a fresh clone, tests need it:
+
+```sh
+git submodule update --init kernel
+```
+
+To take a newer kernel: bump the submodule, `npm run kernel:sync`, commit the
+regenerated file. `npm run kernel:check` (also part of `npm test`) fails when
+the committed tokens drift from the submodule. `scripts/sync-kernel.mjs` is
+the only writer — never hand-edit the generated file. Brand fonts are vendored
+woff2 in `public/fonts/`; type scale, radii and spacing stay app-local.
+
 ## Update the deployed board
 
 ```sh
@@ -87,5 +103,21 @@ git — drop them there yourself; without one the board falls back to that event
 8-bit jingle. Clips only play for people on the `names` map — a bot or an unmapped
 login gets the jingle, so adding a teammate to the map is what opts them in.
 
+Celebration clips: drop `.gif`/`.webp` files into `public/celebrations/` and a
+merge takeover shows one at random in the trophy slot (the WWE-gif move). The
+folder is gitignored like the sounds — the clips are somebody's copyrighted
+footage, so they live only on the machine running the board. No folder or no
+files means the pixel trophy carries the takeover, same as ever. Drop-ins are
+picked up per merge, no restart needed.
+
+With a `GIPHY_API_KEY` set, the server also keeps `public/celebrations/giphy/`
+stocked from the Giphy search API — one pull at boot and one a day after,
+always onto local disk, so a takeover never waits on the network and a dead
+network just replays the last pool. `celebrationGifs` in `config.json` sets
+the search (`query`, default `"wwe"`) and pool size (`limit`, default 20);
+clips fetched this way carry a small "via GIPHY" credit on screen. No key
+means no fetch, and hand-dropped clips work either way. Free key:
+developers.giphy.com.
+
 Secrets live only in `/etc/pr-arcade.env` on the Pi
-(`PORT`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_TOKEN`).
+(`PORT`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_TOKEN`, `GIPHY_API_KEY` optional).

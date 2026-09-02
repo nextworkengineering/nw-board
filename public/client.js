@@ -4,7 +4,8 @@
 // drawn as 8x8 Graphics, baked once into RenderTextures at one texture pixel per art
 // pixel and upscaled with nearest-neighbour filtering (that's the chunky look), and
 // the 8-bit jingles are WebAudio square/triangle oscillators plus a noise buffer.
-// Nothing to download, nothing to license, nothing to keep in sync with the Pi's disk.
+// Nothing reaches beyond the Pi's disk: the only fetched assets are the brand
+// fonts vendored in public/fonts, served by the same express.static as everything else.
 //
 // PixiJS is served from public/vendor, a symlink to node_modules/pixi.js/dist that the
 // existing express.static already covers, so the kiosk never reaches a CDN and works
@@ -12,45 +13,89 @@
 import {
   Application,
   Container,
+  Filter,
+  GlProgram,
   Graphics,
   Sprite,
   Text,
   Texture,
 } from "./vendor/pixi.min.mjs";
 import { play, resumeAudio } from "./audio.js";
+import { KERNEL } from "./kernel-tokens.gen.js";
 
 // The scene is authored at 1080p and scaled to fit whatever the TV reports, so the
 // layout is fixed numbers rather than a responsive system nobody will ever resize.
 const W = 1920;
 const H = 1080;
 
+// The board's semantic palette, resolved from the brand kernel. Names stay
+// arcade-local; values come from kernel-tokens.gen.js only. The dark ground is
+// the kernel's leather-warm dark family — never blue-black. Accents follow the
+// categorical convention; red and plum ride the 400 rungs because their 500s
+// fall under 4.5:1 against leather at TV distance.
 const C = {
-  bg: 0x0b0b1a,
-  panel: 0x141433,
-  panelEdge: 0x2b2b6b,
-  ink: 0x9fe8ff,
-  dim: 0x5b6ba8,
-  amber: 0xffe066,
-  green: 0x66ddaa,
-  red: 0xff5c7a,
-  magenta: 0xff7ce5,
-  orange: 0xff9a3c,
-  white: 0xffffff,
+  bg: KERNEL["surface-dark"],
+  panel: KERNEL["surface-dark-raised"],
+  panelDeep: KERNEL["brand-900"],
+  panelEdge: KERNEL["brand-700"],
+  ink: KERNEL["text-on-dark"],
+  dim: KERNEL["text-on-dark-muted"],
+  amber: KERNEL["accent-canary"],
+  green: KERNEL["accent-emerald"],
+  red: KERNEL["error-400"],
+  magenta: KERNEL["plum-400"],
+  orange: KERNEL["accent-pumpkin"],
+  info: KERNEL["information-400"],
+  white: KERNEL["warm-white"],
 };
 
-const FONT = 'ui-monospace, "DejaVu Sans Mono", "Courier New", monospace';
-const label = (text, fontSize, fill, extra) =>
-  new Text({ text, style: { fontFamily: FONT, fontSize, fill, letterSpacing: 2, ...extra } });
+// Brand type, vendored in public/fonts. Display moments (>=54px: takeover
+// banners, marquee title, MVP name, chime) get Suisse Neue with the kernel's
+// display tracking; everything smaller is FK Grotesk Neue, untracked — the
+// kernel hard-blocks letter-spacing on UI text.
+const FONT_UI = '"FK Grotesk Neue", system-ui, sans-serif';
+const FONT_DISPLAY = '"Suisse Neue", "FK Grotesk Neue", system-ui, sans-serif';
+const label = (text, fontSize, fill, extra) => {
+  const display = fontSize >= 54;
+  return new Text({
+    text,
+    style: {
+      fontFamily: display ? FONT_DISPLAY : FONT_UI,
+      fontWeight: "500",
+      fontSize,
+      fill,
+      letterSpacing: display ? Math.round(fontSize * -0.01) : 0,
+      ...extra,
+    },
+  });
+};
 
 const EVENTS = {
   "pr-merged": { name: "MERGED", color: C.amber, icon: "trophy" },
   "review-approved": { name: "APPROVED", color: C.green, icon: "check" },
-  "pr-opened": { name: "OPENED", color: C.ink, icon: "rocket" },
+  "pr-opened": { name: "OPENED", color: C.info, icon: "rocket" },
   "pr-closed": { name: "CLOSED", color: C.dim, icon: "crate" },
   "changes-requested": { name: "CHANGES", color: C.red, icon: "bang" },
   "pr-comment": { name: "COMMENT", color: C.magenta, icon: "bubble" },
 };
 const CELEBRATIONS = new Set(["pr-merged", "review-approved"]);
+
+// Pixi bakes glyphs when a Text is constructed, and canvas text never triggers
+// lazy @font-face loading on its own — so load the brand faces explicitly before
+// any Text exists. Never let a missing file hang the kiosk: after 3s the
+// system-ui fallbacks in the FONT stacks take over and the board boots anyway.
+try {
+  await Promise.race([
+    Promise.all([
+      document.fonts.load('500 62px "Suisse Neue"'),
+      document.fonts.load('500 24px "FK Grotesk Neue"'),
+      document.fonts.load('400 24px "FK Grotesk Neue"'),
+    ]),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("font timeout")), 3000)),
+  ]);
+} catch {
+  // Fallback type beats a dark TV.
+}
 
 // antialias off keeps the pixel art crisp and is one less thing for the Pi's GPU to do.
 const app = new Application();
@@ -58,7 +103,17 @@ const app = new Application();
 // window would quadruple the pixels the Pi pushes per frame, which lands it under
 // Pixi's 10fps clock clamp and everything plays in slow motion. The finished 2MP
 // frame is scaled to the screen by CSS instead; `pixelated` keeps the chunky look.
-await app.init({ background: C.bg, antialias: false, width: W, height: H, resolution: 1 });
+// preference "webgl": the ground shader ships a GlProgram only, and the Pi is
+// WebGL regardless — pinning it keeps the Mac (where Chrome would pick WebGPU)
+// on the same code path as the TV.
+await app.init({
+  background: C.bg,
+  antialias: false,
+  width: W,
+  height: H,
+  resolution: 1,
+  preference: "webgl",
+});
 document.body.appendChild(app.canvas);
 app.canvas.style.position = "absolute";
 app.canvas.style.imageRendering = "pixelated";
@@ -87,10 +142,7 @@ if (location.search.includes("fps")) {
   } catch {
     rendererName = "webgpu";
   }
-  const fpsText = new Text({
-    text: "",
-    style: { fontFamily: "monospace", fontSize: 26, fill: 0x00ff88 },
-  });
+  const fpsText = label("", 26, C.green);
   fpsText.position.set(8, 8);
   fpsText.zIndex = 1000;
   app.stage.addChild(fpsText);
@@ -120,8 +172,8 @@ const PX = {
   b: C.ink,
   r: C.red,
   m: C.magenta,
-  d: 0x3a3a6a,
-  k: 0x0b0b1a,
+  d: KERNEL["brand-600"],
+  k: C.bg,
 };
 
 const SPRITES = {
@@ -285,7 +337,7 @@ function pixelTexture(name) {
       }
     }),
   );
-  ctx.fillStyle = "#05050f";
+  ctx.fillStyle = `#${C.bg.toString(16).padStart(6, "0")}`;
   rows.forEach((row, y) =>
     [...row].forEach((char, x) => {
       if (
@@ -319,7 +371,71 @@ function pixelSprite(name, scale = 6, tint) {
 // scanlines and one slow roll band that move — the only per-frame background work.
 // --------------------------------------------------------------------------------
 
+// The ground shader: slow-drifting value noise that lifts the leather ground
+// partway toward the raised panel tone — warm phosphor clouds, not a gradient
+// and never a second hue. Colors arrive as uniforms from C; the GLSL holds no
+// values of its own. ?flat skips it entirely (Pi troubleshooting).
+const FLAT = location.search.includes("flat");
+const rgb = (n) => [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+let groundShader = null;
+if (!FLAT) {
+  const vertex = `
+    attribute vec2 aPosition;
+    varying vec2 vTextureCoord;
+    uniform vec4 uInputSize;
+    uniform vec4 uOutputFrame;
+    uniform vec4 uOutputTexture;
+    void main(void) {
+      gl_Position = vec4(aPosition * 2.0 - 1.0, 0.0, 1.0);
+      vTextureCoord = aPosition;
+    }
+  `;
+  const fragment = `
+    precision mediump float;
+    varying vec2 vTextureCoord;
+    uniform float uTime;
+    uniform float uStrength;
+    uniform vec3 uGround;
+    uniform vec3 uGlow;
+    float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    float noise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      vec2 u = f * f * (3.0 - 2.0 * f);
+      return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
+                 mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
+    }
+    void main(void) {
+      vec2 p = vTextureCoord * vec2(1.78, 1.0);
+      float n = noise(p * 3.0 + vec2(uTime * 0.020, uTime * 0.013));
+      n += 0.5 * noise(p * 7.0 - vec2(uTime * 0.011, uTime * 0.007));
+      n /= 1.5;
+      gl_FragColor = vec4(mix(uGround, uGlow, n * uStrength), 1.0);
+    }
+  `;
+  groundShader = new Filter({
+    glProgram: new GlProgram({ vertex, fragment }),
+    resources: {
+      groundUniforms: {
+        uTime: { value: 0, type: "f32" },
+        uStrength: { value: 0.35, type: "f32" },
+        uGround: { value: rgb(C.bg), type: "vec3<f32>" },
+        uGlow: { value: rgb(C.panel), type: "vec3<f32>" },
+      },
+    },
+  });
+}
+
 function buildBackground() {
+  if (groundShader) {
+    const ground = new Sprite(dotTexture());
+    ground.width = W;
+    ground.height = H;
+    ground.filters = [groundShader];
+    ground.eventMode = "none";
+    layers.back.addChild(ground);
+  }
+
   const stars = new Graphics();
   for (let i = 0; i < 140; i++) {
     const x = Math.random() * W;
@@ -337,8 +453,10 @@ function buildBackground() {
   // Scanlines: 270 dark rows in one static Graphics, drawn over the board so the
   // panels get the CRT texture too.
   const scanlines = new Graphics();
+  // Leather rather than black: dimming toward the ground color keeps every
+  // darkened pixel in the warm family. Leather is lighter, so the alpha rises.
   for (let y = 0; y < H; y += 4) scanlines.rect(0, y, W, 2);
-  scanlines.fill({ color: 0x000000, alpha: 0.22 });
+  scanlines.fill({ color: C.bg, alpha: 0.3 });
   scanlines.eventMode = "none";
   world.addChild(scanlines);
 
@@ -382,12 +500,14 @@ layers.board.addChild(marquee);
 marquee.addChild(
   new Graphics()
     .roundRect(0, 0, 1872, 168, 14)
-    .fill({ color: 0x1a0f2e })
-    .stroke({ width: 5, color: C.magenta }),
+    .fill({ color: C.panelDeep })
+    .stroke({ width: 5, color: C.panelEdge }),
 );
 
-const title = label("NEXTWORK ARCADE", 62, C.magenta, {
-  dropShadow: { color: C.ink, distance: 4, blur: 0, angle: Math.PI / 4, alpha: 0.9 },
+// Paper on dark, not an accent: the hero recedes into the cabinet and lets the
+// canary bulbs and MVP name carry the marquee's 5% of color.
+const title = label("NEXTWORK ARCADE", 62, C.ink, {
+  dropShadow: { color: C.bg, distance: 4, blur: 0, angle: Math.PI / 4, alpha: 0.9 },
 });
 title.position.set(48, 52);
 marquee.addChild(title);
@@ -479,7 +599,7 @@ const feedRows = Array.from({ length: FEED_ROWS }, (_, i) => {
   time.position.set(420, 8);
   // Repo pill: a small rounded chip redrawn per render (width follows the text).
   const pillBg = new Graphics();
-  const pillText = label("", 17, C.dim, { letterSpacing: 1 });
+  const pillText = label("", 17, C.dim);
   const pill = new Container();
   pill.position.set(528, 6);
   pill.addChild(pillBg, pillText);
@@ -513,7 +633,7 @@ tickerStrip.addChild(
 );
 const tickerContent = new Container();
 // The scroll is clipped to the frame so segments don't poke into the margins.
-const tickerMask = new Graphics().roundRect(26, TICKER_Y, 1868, TICKER_H, 10).fill(0xffffff);
+const tickerMask = new Graphics().roundRect(26, TICKER_Y, 1868, TICKER_H, 10).fill(C.white);
 tickerStrip.addChild(tickerMask, tickerContent);
 tickerContent.mask = tickerMask;
 layers.board.addChild(tickerStrip);
@@ -537,7 +657,7 @@ function tickerSequence(openPrs) {
   }
   for (const pr of openPrs) {
     const item = new Container();
-    const pillText = label(pr.repo.split("/").pop(), 20, C.green, { letterSpacing: 1 });
+    const pillText = label(pr.repo.split("/").pop(), 20, C.green);
     pillText.position.set(12, TICKER_Y + 38);
     const pill = new Graphics()
       .roundRect(0, TICKER_Y + 30, Math.ceil(pillText.width) + 24, 38, 8)
@@ -595,7 +715,8 @@ function renderFeed() {
       .stroke({ color: C.dim, alpha: 0.7, width: 1.5 });
     // Title starts just past the pill and runs to the panel edge.
     title.position.x = pill.position.x + pillWidth + 14;
-    // 24px monospace + letterSpacing 2 ≈ 16.5px per glyph.
+    // 16.5px per glyph was tuned for 24px monospace; FK Grotesk runs narrower,
+    // so this clips early rather than overflowing. Tune down after a TV check.
     title.text = clip(
       `#${entry.number}  ${entry.title}`,
       Math.max(0, Math.floor((1828 - title.position.x) / 16.5)),
@@ -737,6 +858,67 @@ function stepParticles(pieces, delta, gravity = 0.18) {
 // other rather than fighting over the middle of the screen.
 // --------------------------------------------------------------------------------
 
+// Celebration clips (the WWE gifs): the canvas can't play a gif, so a clip
+// rides a DOM <img> above it, placed with the same fit math the canvas uses.
+// The list comes from the server at boot (gitignored drop-in folder, same deal
+// as the event sounds); empty list means the trophy carries the takeover alone.
+const celebrationClips = { list: [] };
+fetch("/celebrations")
+  .then((r) => r.json())
+  .then((list) => {
+    if (Array.isArray(list)) celebrationClips.list = list;
+  })
+  .catch(() => {});
+
+function showCelebrationClip(durationMs) {
+  const list = celebrationClips.list;
+  if (!list.length) return false;
+  // Giphy's pool lives under giphy/, so the path can carry a slash.
+  const pick = list[Math.floor(Math.random() * list.length)];
+  const hex = (n) => `#${n.toString(16).padStart(6, "0")}`;
+  // Design-space box in the trophy slot, above the banner.
+  const bw = 640;
+  const bh = 340;
+  const scale = Math.min(innerWidth / W, innerHeight / H);
+  const left = (innerWidth - W * scale) / 2;
+  const top = (innerHeight - H * scale) / 2;
+  const box = document.createElement("div");
+  box.style.position = "absolute";
+  box.style.zIndex = "10";
+  box.style.width = `${Math.round(bw * scale)}px`;
+  box.style.height = `${Math.round(bh * scale)}px`;
+  box.style.left = `${Math.round(left + (W / 2 - bw / 2) * scale)}px`;
+  box.style.top = `${Math.round(top + (230 - bh / 2) * scale)}px`;
+  const img = document.createElement("img");
+  img.src = `/celebrations/${pick.split("/").map(encodeURIComponent).join("/")}`;
+  img.style.width = "100%";
+  img.style.height = "100%";
+  img.style.objectFit = "cover";
+  img.style.border = `${Math.max(2, Math.round(4 * scale))}px solid ${hex(C.panelEdge)}`;
+  img.style.borderRadius = `${Math.round(10 * scale)}px`;
+  img.style.background = hex(C.bg);
+  img.style.boxSizing = "border-box";
+  box.appendChild(img);
+  // Giphy's terms ask for the credit; hand-dropped clips carry none.
+  if (pick.startsWith("giphy/")) {
+    const credit = document.createElement("div");
+    credit.textContent = "via GIPHY";
+    credit.style.position = "absolute";
+    credit.style.right = "0";
+    credit.style.bottom = `${-Math.round(24 * scale)}px`;
+    credit.style.fontFamily = FONT_UI;
+    credit.style.fontWeight = "500";
+    credit.style.fontSize = `${Math.max(10, Math.round(16 * scale))}px`;
+    credit.style.color = hex(C.dim);
+    box.appendChild(credit);
+  }
+  // A broken file must not leave an empty frame on the TV for five seconds.
+  img.addEventListener("error", () => box.remove());
+  document.body.appendChild(box);
+  setTimeout(() => box.remove(), durationMs);
+  return true;
+}
+
 const pending = [];
 let takeoverBusy = false;
 
@@ -769,12 +951,14 @@ function takeoverScene(headline, color, event, verb) {
   const dim = new Sprite(dotTexture());
   dim.width = W;
   dim.height = H;
-  dim.tint = 0x000000;
+  // Dim toward leather, not black: knocking the board back to the ground color
+  // is the warm-dark move, and a black wash cools every pixel under it.
+  dim.tint = C.bg;
   dim.alpha = 0;
   scene.addChild(dim);
 
   const banner = label(headline, 132, color, {
-    dropShadow: { color: 0x000000, distance: 6, blur: 0, angle: Math.PI / 4, alpha: 1 },
+    dropShadow: { color: C.bg, distance: 6, blur: 0, angle: Math.PI / 4, alpha: 1 },
   });
   banner.anchor.set(0.5);
   banner.position.set(W / 2, H / 2 - 60);
@@ -808,8 +992,11 @@ function mergedTakeover(event, done) {
     "merged by",
   );
 
+  // A dropped-in clip takes the trophy slot; no clips, the trophy keeps its job.
+  const showedClip = showCelebrationClip(5000);
   const trophy = pixelSprite("trophy16", 7);
   trophy.position.set(W / 2, H / 2 - 240);
+  trophy.visible = !showedClip;
   scene.addChild(trophy);
 
   const confetti = particles(scene, 110, () => {
@@ -845,7 +1032,7 @@ function mergedTakeover(event, done) {
     scene,
     5000,
     (progress, elapsed, delta) => {
-      dim.alpha = Math.min(progress * 4, 0.75) * (progress > 0.85 ? (1 - progress) / 0.15 : 1);
+      dim.alpha = Math.min(progress * 4, 0.85) * (progress > 0.85 ? (1 - progress) / 0.15 : 1);
       banner.scale.set(Math.min(elapsed / 220, 1) * (1 + Math.sin(elapsed / 160) * 0.06));
       banner.y = H / 2 - 60 + Math.sin(elapsed / 200) * 18;
       caption.alpha = Math.min(elapsed / 400, 1);
@@ -899,7 +1086,7 @@ function approvedTakeover(event, done) {
     scene,
     5000,
     (progress, elapsed, delta) => {
-      dim.alpha = Math.min(progress * 5, 0.7) * (progress > 0.85 ? (1 - progress) / 0.15 : 1);
+      dim.alpha = Math.min(progress * 5, 0.8) * (progress > 0.85 ? (1 - progress) / 0.15 : 1);
       // The stamp drops fast, overshoots, settles.
       const drop = Math.min(elapsed / 320, 1);
       stamp.scale.set(24 - 12 * drop + Math.sin(drop * Math.PI) * 4);
@@ -1033,8 +1220,8 @@ function chime(at = "") {
       ? `CONGRATULATIONS TO TODAY'S MVP${currentMvp.names.length > 1 ? "S" : ""}, ${currentMvp.names.map((n) => String(n).toUpperCase()).join(" & ")} — YOU CRUSHED IT!`
       : null;
 
-  const banner = label(headline, 54, C.magenta, {
-    dropShadow: { color: 0x000000, distance: 4, blur: 0, angle: Math.PI / 4, alpha: 1 },
+  const banner = label(headline, 54, C.ink, {
+    dropShadow: { color: C.bg, distance: 4, blur: 0, angle: Math.PI / 4, alpha: 1 },
   });
   const stand = label(standCall, 38, C.ink);
   const congrats = congratsText ? label(congratsText, 38, C.amber) : null;
@@ -1044,8 +1231,8 @@ function chime(at = "") {
   backing.anchor.set(0.5);
   backing.width = W;
   backing.height = congrats ? 300 : 230;
-  backing.tint = 0x000000;
-  backing.alpha = 0.75;
+  backing.tint = C.bg;
+  backing.alpha = 0.85;
   backing.position.set(W / 2, H / 2);
   scene.addChild(backing);
   rows.forEach((row, i) => {
@@ -1081,6 +1268,7 @@ app.ticker.add((ticker) => {
     bulbs[i].alpha = 0.25 + 0.75 * (0.5 + 0.5 * Math.sin(chase - i * 0.5));
   rollBand.y = ((rollBand.y + ticker.deltaTime * 1.6) % (H + 200)) - 100;
   insertCoin.alpha = Math.floor(phase / 600) % 2 ? 0.25 : 1;
+  if (groundShader) groundShader.resources.groundUniforms.uniforms.uTime = phase / 1000;
 
   // Lead-change juice: scale decays every frame (cheap), but the fill is set twice —
   // re-rasterising 92px text every frame is not something the Pi needs to do.

@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/server.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "kernel:sync": "node scripts/sync-kernel.mjs",
+    "kernel:check": "node scripts/sync-kernel.mjs --check"
   },
   "dependencies": {
     "express": "^5.2.1",
