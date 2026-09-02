@@ -483,7 +483,7 @@ function panel(x, y, width, height, title, titleColor) {
     .roundRect(0, 0, width, 56, 10)
     .fill({ color: C.panelEdge, alpha: 0.55 });
   box.addChild(bar);
-  const heading = label(title, 30, titleColor);
+  const heading = label(title, 34, titleColor);
   heading.position.set(20, 12);
   box.addChild(heading);
   layers.board.addChild(box);
@@ -512,11 +512,11 @@ const title = label("NEXTWORK ARCADE", 62, C.ink, {
 title.position.set(48, 52);
 marquee.addChild(title);
 
-const insertCoin = label("INSERT PULL REQUEST", 20, C.dim);
+const insertCoin = label("INSERT PULL REQUEST", 24, C.dim);
 insertCoin.position.set(52, 118);
 marquee.addChild(insertCoin);
 
-const mvpCaption = label("TODAY'S MVP", 34, C.ink);
+const mvpCaption = label("TODAY'S MVP", 38, C.ink);
 mvpCaption.anchor.set(1, 0);
 mvpCaption.position.set(1824, 26);
 marquee.addChild(mvpCaption);
@@ -553,7 +553,7 @@ const FEED_ROWS = 12;
 const feedPanel = panel(24, 204, 1872, 756, "LIVE FEED // LAST 24H", C.ink);
 
 // Wall clock on the feed header — the board doubles as the office clock.
-const wallClock = label("", 30, C.ink);
+const wallClock = label("", 34, C.ink);
 wallClock.anchor.set(1, 0);
 wallClock.position.set(1852, 12);
 feedPanel.addChild(wallClock);
@@ -565,7 +565,7 @@ setInterval(() => {
 }, 1000);
 // The last human to deploy to dev, centred on the header: the board answers
 // "who put that on dev?" without anyone opening GitHub.
-const devDeployLabel = label("", 30, C.green);
+const devDeployLabel = label("", 34, C.green);
 devDeployLabel.anchor.set(0.5, 0);
 devDeployLabel.position.set(936, 12);
 feedPanel.addChild(devDeployLabel);
@@ -577,7 +577,7 @@ function setDevDeploy(devDeploy) {
     : "";
 }
 
-const feedEmpty = label("...WAITING FOR PLAYERS...", 26, C.dim);
+const feedEmpty = label("...WAITING FOR PLAYERS...", 30, C.dim);
 feedEmpty.position.set(24, 90);
 feedPanel.addChild(feedEmpty);
 
@@ -589,21 +589,23 @@ const feedRows = Array.from({ length: FEED_ROWS }, (_, i) => {
   row.visible = false;
   const icon = pixelSprite("star", 4);
   icon.position.set(24, 22);
-  const kind = label("", 24, C.ink);
+  const kind = label("", 28, C.ink);
   kind.position.set(56, 8);
   // First names are short, so the name and time sit tight together and the
   // title gets everything to the right of the repo pill.
-  const who = label("", 24, C.ink);
-  who.position.set(196, 8);
-  const time = label("", 24, C.dim);
-  time.position.set(420, 8);
+  // Columns sized for the 28px register: APPROVED (the widest kind) ends near
+  // x196, so the name column starts at 240 with air to spare.
+  const who = label("", 28, C.ink);
+  who.position.set(240, 8);
+  const time = label("", 28, C.dim);
+  time.position.set(470, 8);
   // Repo pill: a small rounded chip redrawn per render (width follows the text).
   const pillBg = new Graphics();
-  const pillText = label("", 17, C.dim);
+  const pillText = label("", 20, C.dim);
   const pill = new Container();
-  pill.position.set(528, 6);
+  pill.position.set(580, 6);
   pill.addChild(pillBg, pillText);
-  const title = label("", 24, C.dim);
+  const title = label("", 28, C.dim);
   title.position.set(0, 8); // x set per render, after the pill
   row.addChild(icon, kind, who, time, pill, title);
   feedPanel.addChild(row);
@@ -647,26 +649,26 @@ function tickerSequence(openPrs) {
     seq.addChild(child);
     x += child.width + TICKER_GAP;
   };
-  const marker = label("★ NOW PLAYING ★", 28, C.green);
-  marker.position.y = TICKER_Y + 34;
+  const marker = label("★ NOW PLAYING ★", 32, C.green);
+  marker.position.y = TICKER_Y + 32;
   put(marker);
   if (!openPrs.length) {
-    const none = label("NO PRS IN FLIGHT — INSERT PULL REQUEST", 28, C.dim);
-    none.position.y = TICKER_Y + 34;
+    const none = label("NO PRS IN FLIGHT — INSERT PULL REQUEST", 32, C.dim);
+    none.position.y = TICKER_Y + 32;
     put(none);
   }
   for (const pr of openPrs) {
     const item = new Container();
-    const pillText = label(pr.repo.split("/").pop(), 20, C.green);
-    pillText.position.set(12, TICKER_Y + 38);
+    const pillText = label(pr.repo.split("/").pop(), 24, C.green);
+    pillText.position.set(14, TICKER_Y + 36);
     const pill = new Graphics()
-      .roundRect(0, TICKER_Y + 30, Math.ceil(pillText.width) + 24, 38, 8)
+      .roundRect(0, TICKER_Y + 26, Math.ceil(pillText.width) + 28, 44, 8)
       .fill({ color: C.white, alpha: 0.05 })
       .stroke({ color: C.green, alpha: 0.6, width: 2 });
-    const head = label(`#${pr.number} ${pr.actor ?? ""}`.trimEnd(), 28, C.amber);
-    head.position.set(Math.ceil(pillText.width) + 40, TICKER_Y + 34);
-    const text = label(clip(pr.title, 60), 28, C.ink);
-    text.position.set(head.position.x + head.width + 28, TICKER_Y + 34);
+    const head = label(`#${pr.number} ${pr.actor ?? ""}`.trimEnd(), 32, C.amber);
+    head.position.set(Math.ceil(pillText.width) + 46, TICKER_Y + 32);
+    const text = label(clip(pr.title, 60), 32, C.ink);
+    text.position.set(head.position.x + head.width + 28, TICKER_Y + 32);
     item.addChild(pill, pillText, head, text);
     put(item);
   }
@@ -706,11 +708,11 @@ function renderFeed() {
     who.text = clip(entry.actor ?? "", 12);
     time.text = clock(entry.at);
     pillText.text = clip(entry.repo.split("/").pop(), 16);
-    pillText.position.set(10, 5);
-    const pillWidth = Math.ceil(pillText.width) + 20;
+    pillText.position.set(11, 6);
+    const pillWidth = Math.ceil(pillText.width) + 22;
     pillBg
       .clear()
-      .roundRect(0, 0, pillWidth, 30, 6)
+      .roundRect(0, 0, pillWidth, 34, 6)
       .fill({ color: C.white, alpha: 0.06 })
       .stroke({ color: C.dim, alpha: 0.7, width: 1.5 });
     // Title starts just past the pill and runs to the panel edge.
@@ -968,7 +970,7 @@ function takeoverScene(headline, color, event, verb) {
     event.repo
       ? `${event.repo.split("/").pop()} #${event.number}  ${clip(event.title ?? "", 46)}`
       : "",
-    32,
+    36,
     C.ink,
   );
   caption.anchor.set(0.5);
@@ -976,7 +978,7 @@ function takeoverScene(headline, color, event, verb) {
   scene.addChild(caption);
 
   // No login means GitHub named nobody; a bare "merged by" credits no one, so skip it.
-  const credit = label(event.actor ? `${verb} ${clip(event.actor, 39)}` : "", 40, color);
+  const credit = label(event.actor ? `${verb} ${clip(event.actor, 39)}` : "", 44, color);
   credit.anchor.set(0.5);
   credit.position.set(W / 2, H / 2 + 130);
   scene.addChild(credit);
@@ -1223,8 +1225,8 @@ function chime(at = "") {
   const banner = label(headline, 54, C.ink, {
     dropShadow: { color: C.bg, distance: 4, blur: 0, angle: Math.PI / 4, alpha: 1 },
   });
-  const stand = label(standCall, 38, C.ink);
-  const congrats = congratsText ? label(congratsText, 38, C.amber) : null;
+  const stand = label(standCall, 42, C.ink);
+  const congrats = congratsText ? label(congratsText, 42, C.amber) : null;
   const rows = congrats ? [banner, stand, congrats] : [banner, stand];
 
   const backing = new Sprite(dotTexture());
