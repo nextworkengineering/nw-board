@@ -4,7 +4,8 @@
 // drawn as 8x8 Graphics, baked once into RenderTextures at one texture pixel per art
 // pixel and upscaled with nearest-neighbour filtering (that's the chunky look), and
 // the 8-bit jingles are WebAudio square/triangle oscillators plus a noise buffer.
-// Nothing to download, nothing to license, nothing to keep in sync with the Pi's disk.
+// Nothing reaches beyond the Pi's disk: the only fetched assets are the brand
+// fonts vendored in public/fonts, served by the same express.static as everything else.
 //
 // PixiJS is served from public/vendor, a symlink to node_modules/pixi.js/dist that the
 // existing express.static already covers, so the kiosk never reaches a CDN and works
@@ -46,9 +47,26 @@ const C = {
   white: KERNEL["warm-white"],
 };
 
-const FONT = 'ui-monospace, "DejaVu Sans Mono", "Courier New", monospace';
-const label = (text, fontSize, fill, extra) =>
-  new Text({ text, style: { fontFamily: FONT, fontSize, fill, letterSpacing: 2, ...extra } });
+// Brand type, vendored in public/fonts. Display moments (>=54px: takeover
+// banners, marquee title, MVP name, chime) get Suisse Neue with the kernel's
+// display tracking; everything smaller is FK Grotesk Neue, untracked — the
+// kernel hard-blocks letter-spacing on UI text.
+const FONT_UI = '"FK Grotesk Neue", system-ui, sans-serif';
+const FONT_DISPLAY = '"Suisse Neue", "FK Grotesk Neue", system-ui, sans-serif';
+const label = (text, fontSize, fill, extra) => {
+  const display = fontSize >= 54;
+  return new Text({
+    text,
+    style: {
+      fontFamily: display ? FONT_DISPLAY : FONT_UI,
+      fontWeight: "500",
+      fontSize,
+      fill,
+      letterSpacing: display ? Math.round(fontSize * -0.01) : 0,
+      ...extra,
+    },
+  });
+};
 
 const EVENTS = {
   "pr-merged": { name: "MERGED", color: C.amber, icon: "trophy" },
@@ -59,6 +77,23 @@ const EVENTS = {
   "pr-comment": { name: "COMMENT", color: C.magenta, icon: "bubble" },
 };
 const CELEBRATIONS = new Set(["pr-merged", "review-approved"]);
+
+// Pixi bakes glyphs when a Text is constructed, and canvas text never triggers
+// lazy @font-face loading on its own — so load the brand faces explicitly before
+// any Text exists. Never let a missing file hang the kiosk: after 3s the
+// system-ui fallbacks in the FONT stacks take over and the board boots anyway.
+try {
+  await Promise.race([
+    Promise.all([
+      document.fonts.load('500 62px "Suisse Neue"'),
+      document.fonts.load('500 24px "FK Grotesk Neue"'),
+      document.fonts.load('400 24px "FK Grotesk Neue"'),
+    ]),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("font timeout")), 3000)),
+  ]);
+} catch {
+  // Fallback type beats a dark TV.
+}
 
 // antialias off keeps the pixel art crisp and is one less thing for the Pi's GPU to do.
 const app = new Application();
@@ -486,7 +521,7 @@ const feedRows = Array.from({ length: FEED_ROWS }, (_, i) => {
   time.position.set(420, 8);
   // Repo pill: a small rounded chip redrawn per render (width follows the text).
   const pillBg = new Graphics();
-  const pillText = label("", 17, C.dim, { letterSpacing: 1 });
+  const pillText = label("", 17, C.dim);
   const pill = new Container();
   pill.position.set(528, 6);
   pill.addChild(pillBg, pillText);
@@ -544,7 +579,7 @@ function tickerSequence(openPrs) {
   }
   for (const pr of openPrs) {
     const item = new Container();
-    const pillText = label(pr.repo.split("/").pop(), 20, C.green, { letterSpacing: 1 });
+    const pillText = label(pr.repo.split("/").pop(), 20, C.green);
     pillText.position.set(12, TICKER_Y + 38);
     const pill = new Graphics()
       .roundRect(0, TICKER_Y + 30, Math.ceil(pillText.width) + 24, 38, 8)
@@ -602,7 +637,8 @@ function renderFeed() {
       .stroke({ color: C.dim, alpha: 0.7, width: 1.5 });
     // Title starts just past the pill and runs to the panel edge.
     title.position.x = pill.position.x + pillWidth + 14;
-    // 24px monospace + letterSpacing 2 ≈ 16.5px per glyph.
+    // 16.5px per glyph was tuned for 24px monospace; FK Grotesk runs narrower,
+    // so this clips early rather than overflowing. Tune down after a TV check.
     title.text = clip(
       `#${entry.number}  ${entry.title}`,
       Math.max(0, Math.floor((1828 - title.position.x) / 16.5)),

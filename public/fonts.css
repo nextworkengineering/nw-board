@@ -1,0 +1,28 @@
+/* NextWork brand typography, vendored so the kiosk works with the network down.
+   FK Grotesk Neue carries UI text; Suisse Neue carries display moments only.
+   client.js loads these explicitly (document.fonts.load) before Pixi bakes any
+   text — canvas text never triggers lazy @font-face loading on its own. */
+
+@font-face {
+  font-family: "FK Grotesk Neue";
+  src: url("/fonts/fk-grotesk-neue/FKGroteskNeue-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "FK Grotesk Neue";
+  src: url("/fonts/fk-grotesk-neue/FKGroteskNeue-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Suisse Neue";
+  src: url("/fonts/suisse-neue/SuisseNeue-Medium-WebS.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
