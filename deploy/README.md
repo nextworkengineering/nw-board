@@ -31,9 +31,9 @@ Pulls, runs `npm ci` only if `package.json`/`package-lock.json` changed, restart
 
 ## Notes
 
-- **Secrets** live only in `/etc/pr-arcade.env`, mode 0600, owned by the display user. Never in the repo. Contains `PORT`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_TOKEN`, and optionally `GIPHY_API_KEY`. Without the Giphy key the board simply never fetches celebration clips; `setup-wizard.sh` does not prompt for it, so add it by hand if you want them.
+- **Secrets** live only in `/etc/pr-arcade.env`, mode 0600, owned by the display user. Never in the repo. Contains `PORT`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_TOKEN`.
 - **Funnel exposes the whole static tree**, not just the webhook: that now includes the vendored commercial woff2 fonts and any celebration clips. Scope it with `tailscale funnel --set-path=/webhook 3000` so only the webhook is public.
-- **Display flags**, appended to the kiosk URL in `kiosk.sh`: `?fps` shows the frame rate and which renderer WebGL actually gave us, `?flat` disables the animated ground shader (use it if the shader costs frames on this Pi), `?demo` runs the full animation tour once.
+- **Display flags**, appended to the kiosk URL in `kiosk.sh`: `?fps` shows the frame rate and which renderer WebGL actually gave us, `?demo` runs the full animation tour once.
 - **Tracked Repos** live in `config.json` at the repo root, alongside the roster and the chime times. It is gitignored — it names your repos and your team — so it lives only on this Pi; edit it here and restart. `cp config.example.json config.json` to start one. The server won't start without it.
 - **Port** is 3000 in two places: `/etc/pr-arcade.env` and the URL in `kiosk.sh`. Change both.
 - **`npm ci`, not `npm ci --omit=dev`**: `npm start` runs the server through `tsx`, which is a devDependency. Switch to `--omit=dev` if that ever changes.

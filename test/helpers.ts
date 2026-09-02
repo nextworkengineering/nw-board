@@ -16,11 +16,6 @@ process.env.GITHUB_WEBHOOK_SECRET = SECRET;
 // Backfill is backfill.test.ts's business (it sets its own token). Without a token
 // no other test can reach the real GitHub API with whatever PAT the shell exported.
 delete process.env.GITHUB_TOKEN;
-// Same hazard, different key: with a real GIPHY_API_KEY exported, every
-// startServer() below would hit api.giphy.com and let the refresh write and
-// DELETE files in public/celebrations/giphy, which is gitignored — so the
-// damage would not even show up in git status.
-delete process.env.GIPHY_API_KEY;
 
 export const fixture = (name: string) =>
   readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");

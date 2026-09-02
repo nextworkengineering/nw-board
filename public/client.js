@@ -13,8 +13,6 @@
 import {
   Application,
   Container,
-  Filter,
-  GlProgram,
   Graphics,
   Sprite,
   Text,
@@ -103,17 +101,7 @@ const app = new Application();
 // window would quadruple the pixels the Pi pushes per frame, which lands it under
 // Pixi's 10fps clock clamp and everything plays in slow motion. The finished 2MP
 // frame is scaled to the screen by CSS instead; `pixelated` keeps the chunky look.
-// preference "webgl": the ground shader ships a GlProgram only, and the Pi is
-// WebGL regardless — pinning it keeps the Mac (where Chrome would pick WebGPU)
-// on the same code path as the TV.
-await app.init({
-  background: C.bg,
-  antialias: false,
-  width: W,
-  height: H,
-  resolution: 1,
-  preference: "webgl",
-});
+await app.init({ background: C.bg, antialias: false, width: W, height: H, resolution: 1 });
 document.body.appendChild(app.canvas);
 app.canvas.style.position = "absolute";
 app.canvas.style.imageRendering = "pixelated";
@@ -371,84 +359,7 @@ function pixelSprite(name, scale = 6, tint) {
 // scanlines and one slow roll band that move — the only per-frame background work.
 // --------------------------------------------------------------------------------
 
-// The ground shader: slow-drifting value noise that lifts the leather ground
-// partway toward the raised panel tone — warm phosphor clouds, not a gradient
-// and never a second hue. Colors arrive as uniforms from C; the GLSL holds no
-// values of its own. ?flat skips it entirely (Pi troubleshooting).
-const FLAT = location.search.includes("flat");
-const rgb = (n) => [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
-let groundShader = null;
-if (!FLAT) {
-  const vertex = `
-    attribute vec2 aPosition;
-    varying vec2 vTextureCoord;
-    uniform vec4 uInputSize;
-    uniform vec4 uOutputFrame;
-    uniform vec4 uOutputTexture;
-    void main(void) {
-      gl_Position = vec4(aPosition * 2.0 - 1.0, 0.0, 1.0);
-      vTextureCoord = aPosition;
-    }
-  `;
-  // highp, and first in the source so Pixi's precision injection leaves it alone:
-  // the sin-based hash below needs fp32. At mediump the Pi's fp16 rounds the
-  // 43758.5453 multiplier to a value whose ULP swallows the fraction, fract()
-  // returns a constant, and the shader renders flat at full cost — while a Mac,
-  // which promotes mediump to fp32, looks perfect.
-  const fragment = `precision highp float;
-    varying vec2 vTextureCoord;
-    uniform float uTime;
-    uniform float uStrength;
-    uniform vec3 uGround;
-    uniform vec3 uGlow;
-    float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-    float noise(vec2 p) {
-      vec2 i = floor(p);
-      vec2 f = fract(p);
-      vec2 u = f * f * (3.0 - 2.0 * f);
-      return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
-                 mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
-    }
-    void main(void) {
-      vec2 p = vTextureCoord * vec2(1.78, 1.0);
-      float n = noise(p * 3.0 + vec2(uTime * 0.020, uTime * 0.013));
-      n += 0.5 * noise(p * 7.0 - vec2(uTime * 0.011, uTime * 0.007));
-      n /= 1.5;
-      gl_FragColor = vec4(mix(uGround, uGlow, n * uStrength), 1.0);
-    }
-  `;
-  groundShader = new Filter({
-    // Quarter resolution: the effect is a soft 7/255 gradient, so it does not
-    // need per-pixel 1080p, and a full-res filter pass costs the Pi an 8 MB
-    // render target plus ~2 MP of fill every frame.
-    resolution: 0.25,
-    glProgram: new GlProgram({ vertex, fragment }),
-    resources: {
-      groundUniforms: {
-        uTime: { value: 0, type: "f32" },
-        uStrength: { value: 0.35, type: "f32" },
-        uGround: { value: rgb(C.bg), type: "vec3<f32>" },
-        uGlow: { value: rgb(C.panel), type: "vec3<f32>" },
-      },
-    },
-  });
-}
-
 function buildBackground() {
-  if (groundShader) {
-    const ground = new Sprite(dotTexture());
-    ground.width = W;
-    ground.height = H;
-    // The texture is white and the filter is WebGL-only: under a WebGPU or
-    // canvas fallback Pixi skips an incompatible filter silently and renders the
-    // sprite as-is, so without this tint the whole board would come up as a
-    // white rectangle on a TV with no keyboard. Tinted, the fallback is just the
-    // flat leather ground.
-    ground.tint = C.bg;
-    ground.filters = [groundShader];
-    ground.eventMode = "none";
-    layers.back.addChild(ground);
-  }
 
   const stars = new Graphics();
   for (let i = 0; i < 140; i++) {
@@ -898,9 +809,9 @@ function stepParticles(pieces, delta, gravity = 0.18) {
 // The list comes from the server at boot (gitignored drop-in folder, same deal
 // as the event sounds); empty list means the trophy carries the takeover alone.
 const celebrationClips = { list: [] };
-// Re-read rather than trusting the list from boot: the server's daily refresh
-// rotates the pool, and this kiosk never reloads, so a list cached at boot would
-// name files that no longer exist by tomorrow.
+// Re-read rather than trusting the list from boot: this kiosk never reloads, so
+// a list cached at boot would never see a clip dropped in afterwards, and would
+// keep naming one that had been removed.
 function loadCelebrationClips() {
   return fetch("/celebrations")
     .then((r) => r.json())
@@ -919,7 +830,6 @@ setInterval(loadCelebrationClips, 60 * 60 * 1000);
 function showCelebrationClip(maxMs, onFail) {
   const list = celebrationClips.list;
   if (!list.length) return null;
-  // Giphy's pool lives under giphy/, so the path can carry a slash.
   const pick = list[Math.floor(Math.random() * list.length)];
   const hex = (n) => `#${n.toString(16).padStart(6, "0")}`;
   // Design-space box in the trophy slot, above the banner.
@@ -942,7 +852,7 @@ function showCelebrationClip(maxMs, onFail) {
   };
   place();
   const img = document.createElement("img");
-  img.src = `/celebrations/${pick.split("/").map(encodeURIComponent).join("/")}`;
+  img.src = `/celebrations/${encodeURIComponent(pick)}`;
   img.style.width = "100%";
   img.style.height = "100%";
   img.style.objectFit = "cover";
@@ -951,26 +861,13 @@ function showCelebrationClip(maxMs, onFail) {
   img.style.background = hex(C.bg);
   img.style.boxSizing = "border-box";
   box.appendChild(img);
-  // Giphy's terms ask for the credit; hand-dropped clips carry none.
-  if (pick.startsWith("giphy/")) {
-    const credit = document.createElement("div");
-    credit.textContent = "via GIPHY";
-    credit.style.position = "absolute";
-    credit.style.right = "0";
-    credit.style.bottom = `${-Math.round(24 * scale)}px`;
-    credit.style.fontFamily = FONT_UI;
-    credit.style.fontWeight = "500";
-    credit.style.fontSize = `${Math.max(10, Math.round(16 * scale))}px`;
-    credit.style.color = hex(C.dim);
-    box.appendChild(credit);
-  }
   const remove = () => {
     removeEventListener("resize", place);
     box.remove();
   };
-  // A file that vanished (the pool rotated under a kiosk that never reloads)
-  // must not leave an empty frame on the TV: hand the slot back to the caller
-  // and re-read the list so the next merge picks from what actually exists.
+  // A file that has since been removed must not leave an empty frame on the TV:
+  // hand the slot back to the caller and re-read the list so the next merge
+  // picks from what actually exists.
   img.addEventListener("error", () => {
     remove();
     loadCelebrationClips();
@@ -1350,7 +1247,6 @@ app.ticker.add((ticker) => {
     bulbs[i].alpha = 0.25 + 0.75 * (0.5 + 0.5 * Math.sin(chase - i * 0.5));
   rollBand.y = ((rollBand.y + ticker.deltaTime * 1.6) % (H + 200)) - 100;
   insertCoin.alpha = Math.floor(phase / 600) % 2 ? 0.25 : 1;
-  if (groundShader) groundShader.resources.groundUniforms.uniforms.uTime = phase / 1000;
 
   // Lead-change juice: scale decays every frame (cheap), but the fill is set twice —
   // re-rasterising 92px text every frame is not something the Pi needs to do.
