@@ -873,29 +873,49 @@ fetch("/celebrations")
 function showCelebrationClip(durationMs) {
   const list = celebrationClips.list;
   if (!list.length) return false;
+  // Giphy's pool lives under giphy/, so the path can carry a slash.
   const pick = list[Math.floor(Math.random() * list.length)];
-  const img = document.createElement("img");
-  img.src = `/celebrations/${encodeURIComponent(pick)}`;
+  const hex = (n) => `#${n.toString(16).padStart(6, "0")}`;
   // Design-space box in the trophy slot, above the banner.
   const bw = 640;
   const bh = 340;
   const scale = Math.min(innerWidth / W, innerHeight / H);
   const left = (innerWidth - W * scale) / 2;
   const top = (innerHeight - H * scale) / 2;
-  img.style.position = "absolute";
-  img.style.zIndex = "10";
+  const box = document.createElement("div");
+  box.style.position = "absolute";
+  box.style.zIndex = "10";
+  box.style.width = `${Math.round(bw * scale)}px`;
+  box.style.height = `${Math.round(bh * scale)}px`;
+  box.style.left = `${Math.round(left + (W / 2 - bw / 2) * scale)}px`;
+  box.style.top = `${Math.round(top + (230 - bh / 2) * scale)}px`;
+  const img = document.createElement("img");
+  img.src = `/celebrations/${pick.split("/").map(encodeURIComponent).join("/")}`;
+  img.style.width = "100%";
+  img.style.height = "100%";
   img.style.objectFit = "cover";
-  img.style.width = `${Math.round(bw * scale)}px`;
-  img.style.height = `${Math.round(bh * scale)}px`;
-  img.style.left = `${Math.round(left + (W / 2 - bw / 2) * scale)}px`;
-  img.style.top = `${Math.round(top + (230 - bh / 2) * scale)}px`;
-  img.style.border = `${Math.max(2, Math.round(4 * scale))}px solid #${C.panelEdge.toString(16).padStart(6, "0")}`;
+  img.style.border = `${Math.max(2, Math.round(4 * scale))}px solid ${hex(C.panelEdge)}`;
   img.style.borderRadius = `${Math.round(10 * scale)}px`;
-  img.style.background = `#${C.bg.toString(16).padStart(6, "0")}`;
+  img.style.background = hex(C.bg);
+  img.style.boxSizing = "border-box";
+  box.appendChild(img);
+  // Giphy's terms ask for the credit; hand-dropped clips carry none.
+  if (pick.startsWith("giphy/")) {
+    const credit = document.createElement("div");
+    credit.textContent = "via GIPHY";
+    credit.style.position = "absolute";
+    credit.style.right = "0";
+    credit.style.bottom = `${-Math.round(24 * scale)}px`;
+    credit.style.fontFamily = FONT_UI;
+    credit.style.fontWeight = "500";
+    credit.style.fontSize = `${Math.max(10, Math.round(16 * scale))}px`;
+    credit.style.color = hex(C.dim);
+    box.appendChild(credit);
+  }
   // A broken file must not leave an empty frame on the TV for five seconds.
-  img.addEventListener("error", () => img.remove());
-  document.body.appendChild(img);
-  setTimeout(() => img.remove(), durationMs);
+  img.addEventListener("error", () => box.remove());
+  document.body.appendChild(box);
+  setTimeout(() => box.remove(), durationMs);
   return true;
 }
 

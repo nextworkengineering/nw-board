@@ -16,5 +16,9 @@
     "octocat": "Mona",
     "some-github-login": "Firstname"
   },
+  "celebrationGifs": {
+    "query": "wwe",
+    "limit": 20
+  },
   "devDeployWorkflow": "env-dev.yaml"
 }
