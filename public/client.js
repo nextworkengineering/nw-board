@@ -390,8 +390,12 @@ if (!FLAT) {
       vTextureCoord = aPosition;
     }
   `;
-  const fragment = `
-    precision mediump float;
+  // highp, and first in the source so Pixi's precision injection leaves it alone:
+  // the sin-based hash below needs fp32. At mediump the Pi's fp16 rounds the
+  // 43758.5453 multiplier to a value whose ULP swallows the fraction, fract()
+  // returns a constant, and the shader renders flat at full cost — while a Mac,
+  // which promotes mediump to fp32, looks perfect.
+  const fragment = `precision highp float;
     varying vec2 vTextureCoord;
     uniform float uTime;
     uniform float uStrength;
@@ -414,6 +418,10 @@ if (!FLAT) {
     }
   `;
   groundShader = new Filter({
+    // Quarter resolution: the effect is a soft 7/255 gradient, so it does not
+    // need per-pixel 1080p, and a full-res filter pass costs the Pi an 8 MB
+    // render target plus ~2 MP of fill every frame.
+    resolution: 0.25,
     glProgram: new GlProgram({ vertex, fragment }),
     resources: {
       groundUniforms: {
@@ -431,6 +439,12 @@ function buildBackground() {
     const ground = new Sprite(dotTexture());
     ground.width = W;
     ground.height = H;
+    // The texture is white and the filter is WebGL-only: under a WebGPU or
+    // canvas fallback Pixi skips an incompatible filter silently and renders the
+    // sprite as-is, so without this tint the whole board would come up as a
+    // white rectangle on a TV with no keyboard. Tinted, the fallback is just the
+    // flat leather ground.
+    ground.tint = C.bg;
     ground.filters = [groundShader];
     ground.eventMode = "none";
     layers.back.addChild(ground);
@@ -597,8 +611,12 @@ const feedRows = Array.from({ length: FEED_ROWS }, (_, i) => {
   // x196, so the name column starts at 240 with air to spare.
   const who = label("", 28, C.ink);
   who.position.set(240, 8);
+  // Right-anchored: FK Grotesk's digits are proportional, so a left-anchored
+  // HH:MM column wanders by up to 30px across twelve rows. Anchoring right puts
+  // the ragged edge where the eye is not tracking a column.
   const time = label("", 28, C.dim);
-  time.position.set(470, 8);
+  time.anchor.set(1, 0);
+  time.position.set(556, 8);
   // Repo pill: a small rounded chip redrawn per render (width follows the text).
   const pillBg = new Graphics();
   const pillText = label("", 20, C.dim);
@@ -689,6 +707,26 @@ const stamp = (event) => ({ ...event, at: event.at ?? Date.now() });
 
 const clip = (text, max) =>
   text.length > max ? `${text.slice(0, max - 1)}…` : text;
+
+/**
+ * Set `full` on a Text, trimmed with an ellipsis until it actually fits.
+ * Measured rather than estimated: with a proportional font a per-glyph guess is
+ * wrong in both directions — it wastes a fifth of a column of narrow text, and
+ * overruns the panel on wide text. Only runs on a feed render, never per frame.
+ */
+function fitText(target, full, maxWidth) {
+  target.text = full;
+  if (target.width <= maxWidth) return;
+  let lo = 0;
+  let hi = full.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    target.text = `${full.slice(0, mid)}…`;
+    if (target.width <= maxWidth) lo = mid;
+    else hi = mid - 1;
+  }
+  target.text = `${full.slice(0, lo)}…`;
+}
 const clock = (at) => new Date(at).toTimeString().slice(0, 5);
 
 function renderFeed() {
@@ -717,12 +755,7 @@ function renderFeed() {
       .stroke({ color: C.dim, alpha: 0.7, width: 1.5 });
     // Title starts just past the pill and runs to the panel edge.
     title.position.x = pill.position.x + pillWidth + 14;
-    // 16.5px per glyph was tuned for 24px monospace; FK Grotesk runs narrower,
-    // so this clips early rather than overflowing. Tune down after a TV check.
-    title.text = clip(
-      `#${entry.number}  ${entry.title}`,
-      Math.max(0, Math.floor((1828 - title.position.x) / 16.5)),
-    );
+    fitText(title, `#${entry.number}  ${entry.title}`, 1828 - title.position.x);
     // Older entries fade toward the bottom of the panel, so the eye lands on the top.
     row.alpha = 1 - i * 0.045;
   }
@@ -865,32 +898,49 @@ function stepParticles(pieces, delta, gravity = 0.18) {
 // The list comes from the server at boot (gitignored drop-in folder, same deal
 // as the event sounds); empty list means the trophy carries the takeover alone.
 const celebrationClips = { list: [] };
-fetch("/celebrations")
-  .then((r) => r.json())
-  .then((list) => {
-    if (Array.isArray(list)) celebrationClips.list = list;
-  })
-  .catch(() => {});
+// Re-read rather than trusting the list from boot: the server's daily refresh
+// rotates the pool, and this kiosk never reloads, so a list cached at boot would
+// name files that no longer exist by tomorrow.
+function loadCelebrationClips() {
+  return fetch("/celebrations")
+    .then((r) => r.json())
+    .then((list) => {
+      if (Array.isArray(list)) celebrationClips.list = list;
+    })
+    .catch(() => {});
+}
+loadCelebrationClips();
+setInterval(loadCelebrationClips, 60 * 60 * 1000);
 
-function showCelebrationClip(durationMs) {
+/**
+ * Show a clip in the takeover's trophy slot. Returns a remove function, or null
+ * when there is nothing to show. `onFail` runs if the file turns out to be gone.
+ */
+function showCelebrationClip(maxMs, onFail) {
   const list = celebrationClips.list;
-  if (!list.length) return false;
+  if (!list.length) return null;
   // Giphy's pool lives under giphy/, so the path can carry a slash.
   const pick = list[Math.floor(Math.random() * list.length)];
   const hex = (n) => `#${n.toString(16).padStart(6, "0")}`;
   // Design-space box in the trophy slot, above the banner.
   const bw = 640;
   const bh = 340;
-  const scale = Math.min(innerWidth / W, innerHeight / H);
-  const left = (innerWidth - W * scale) / 2;
-  const top = (innerHeight - H * scale) / 2;
   const box = document.createElement("div");
   box.style.position = "absolute";
   box.style.zIndex = "10";
-  box.style.width = `${Math.round(bw * scale)}px`;
-  box.style.height = `${Math.round(bh * scale)}px`;
-  box.style.left = `${Math.round(left + (W / 2 - bw / 2) * scale)}px`;
-  box.style.top = `${Math.round(top + (230 - bh / 2) * scale)}px`;
+  // The canvas re-fits on resize, so the clip has to follow it or an HDMI
+  // resolution change mid-takeover leaves it hanging off the frame.
+  let scale = 1;
+  const place = () => {
+    scale = Math.min(innerWidth / W, innerHeight / H);
+    const left = (innerWidth - W * scale) / 2;
+    const top = (innerHeight - H * scale) / 2;
+    box.style.width = `${Math.round(bw * scale)}px`;
+    box.style.height = `${Math.round(bh * scale)}px`;
+    box.style.left = `${Math.round(left + (W / 2 - bw / 2) * scale)}px`;
+    box.style.top = `${Math.round(top + (230 - bh / 2) * scale)}px`;
+  };
+  place();
   const img = document.createElement("img");
   img.src = `/celebrations/${pick.split("/").map(encodeURIComponent).join("/")}`;
   img.style.width = "100%";
@@ -914,11 +964,29 @@ function showCelebrationClip(durationMs) {
     credit.style.color = hex(C.dim);
     box.appendChild(credit);
   }
-  // A broken file must not leave an empty frame on the TV for five seconds.
-  img.addEventListener("error", () => box.remove());
+  const remove = () => {
+    removeEventListener("resize", place);
+    box.remove();
+  };
+  // A file that vanished (the pool rotated under a kiosk that never reloads)
+  // must not leave an empty frame on the TV: hand the slot back to the caller
+  // and re-read the list so the next merge picks from what actually exists.
+  img.addEventListener("error", () => {
+    remove();
+    loadCelebrationClips();
+    onFail?.();
+  });
+  addEventListener("resize", place);
   document.body.appendChild(box);
-  setTimeout(() => box.remove(), durationMs);
-  return true;
+  // The caller clears this when its scene ends. The timer is only a backstop:
+  // scene time is ticker time, which Pixi clamps at 100ms per frame, so on a Pi
+  // running slow a wall-clock timeout would pull the clip long before the
+  // takeover finishes.
+  const backstop = setTimeout(remove, maxMs);
+  return () => {
+    clearTimeout(backstop);
+    remove();
+  };
 }
 
 const pending = [];
@@ -994,11 +1062,14 @@ function mergedTakeover(event, done) {
     "merged by",
   );
 
-  // A dropped-in clip takes the trophy slot; no clips, the trophy keeps its job.
-  const showedClip = showCelebrationClip(5000);
+  // A dropped-in clip takes the trophy slot; no clips (or a clip whose file has
+  // since been rotated away), the trophy keeps its job.
   const trophy = pixelSprite("trophy16", 7);
   trophy.position.set(W / 2, H / 2 - 240);
-  trophy.visible = !showedClip;
+  const clip = showCelebrationClip(15_000, () => {
+    if (!trophy.destroyed) trophy.visible = true;
+  });
+  trophy.visible = !clip;
   scene.addChild(trophy);
 
   const confetti = particles(scene, 110, () => {
@@ -1045,7 +1116,10 @@ function mergedTakeover(event, done) {
       stepParticles(fireworks, delta, 0.1);
       for (const spark of fireworks) spark.alpha = 1 - progress;
     },
-    done,
+    () => {
+      clip?.();
+      done?.();
+    },
   );
 }
 
@@ -1237,8 +1311,14 @@ function chime(at = "") {
   backing.alpha = 0.85;
   backing.position.set(W / 2, H / 2);
   scene.addChild(backing);
+  // A three-way MVP tie runs this line past both screen edges at 42px, so any
+  // row wider than the content width is scaled down to fit rather than clipped.
+  const fitRow = (row) => (row.width > 1840 ? 1840 / row.width : 1);
+  const bannerFit = fitRow(banner);
   rows.forEach((row, i) => {
     row.anchor.set(0.5);
+    // The banner's scale is animated below, so its fit rides along there.
+    if (row !== banner) row.scale.set(fitRow(row));
     row.position.set(W / 2, H / 2 + (i - (rows.length - 1) / 2) * 76);
     if (i > 0) row.alpha = 0;
     scene.addChild(row);
@@ -1249,7 +1329,7 @@ function chime(at = "") {
     const fade =
       progress < 0.05 ? progress / 0.05 : progress > 0.92 ? (1 - progress) / 0.08 : 1;
     scene.alpha = fade;
-    banner.scale.set(0.9 + Math.min(fade, 1) * 0.1);
+    banner.scale.set((0.9 + Math.min(fade, 1) * 0.1) * bannerFit);
     // The extra lines fade in one beat apart.
     rows.forEach((row, i) => {
       if (i > 0) row.alpha = Math.min(Math.max((elapsed - 600 * i) / 500, 0), 1) * fade;

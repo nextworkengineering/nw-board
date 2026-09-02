@@ -119,5 +119,9 @@ clips fetched this way carry a small "via GIPHY" credit on screen. No key
 means no fetch, and hand-dropped clips work either way. Free key:
 developers.giphy.com.
 
+`public/celebrations/giphy/` is server-owned: each refresh deletes anything in
+there that is not in the current pool, so drop your own clips one level up in
+`public/celebrations/`, which the refresh never touches.
+
 Secrets live only in `/etc/pr-arcade.env` on the Pi
 (`PORT`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_TOKEN`, `GIPHY_API_KEY` optional).

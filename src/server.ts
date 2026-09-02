@@ -140,10 +140,23 @@ export async function startServer(port: number, options: Options = {}) {
   // many clips it keeps. Absent means the defaults; the fetch itself only runs
   // when a GIPHY_API_KEY is present.
   const celebrationGifs = config.celebrationGifs ?? {};
+  // A wrong shape here used to pass silently and fall back to the defaults,
+  // unlike every other key in this block.
+  if (
+    typeof celebrationGifs !== "object" ||
+    celebrationGifs === null ||
+    Array.isArray(celebrationGifs)
+  )
+    throw new Error(`${configPath}: celebrationGifs must be {"query":"…","limit":<1-50>}`);
   if (celebrationGifs.query !== undefined && typeof celebrationGifs.query !== "string")
     throw new Error(`${configPath}: celebrationGifs.query must be a string`);
-  if (celebrationGifs.limit !== undefined && !Number.isInteger(celebrationGifs.limit))
-    throw new Error(`${configPath}: celebrationGifs.limit must be an integer`);
+  if (
+    celebrationGifs.limit !== undefined &&
+    (!Number.isInteger(celebrationGifs.limit) ||
+      celebrationGifs.limit < 1 ||
+      celebrationGifs.limit > 50)
+  )
+    throw new Error(`${configPath}: celebrationGifs.limit must be an integer from 1 to 50`);
 
   // Quiet Hours: sound is allowed on weekdays between these two local times only.
   const quietHours = `${configPath}: quietHours must be {"soundStart":"HH:MM","soundEnd":"HH:MM"}`;
@@ -317,18 +330,37 @@ export async function startServer(port: number, options: Options = {}) {
   const giphyApiKey =
     options.giphyApiKey === null ? undefined : (options.giphyApiKey ?? process.env.GIPHY_API_KEY);
   let giphyTimer: NodeJS.Timeout | undefined;
+  // close() aborts whatever a refresh has in flight, so a restart can never have
+  // the outgoing process deleting clips the incoming one just downloaded.
+  const giphyAbort = new AbortController();
+  let giphyInFlight: Promise<unknown> = Promise.resolve();
   if (giphyApiKey) {
-    const refresh = () =>
-      refreshGiphyCache({
+    let running = false;
+    const refresh = () => {
+      // A slow run must not have the next day's tick start a second sweep.
+      if (running) return;
+      running = true;
+      giphyInFlight = refreshGiphyCache({
         apiKey: giphyApiKey,
         dir: join(celebrationsDir, "giphy"),
         query: celebrationGifs.query ?? "wwe",
         limit: celebrationGifs.limit ?? 20,
+        signal: giphyAbort.signal,
       })
-        .then(({ total, added, removed }) =>
-          console.log(`giphy: ${total} clips cached (+${added} −${removed})`),
+        .then(({ total, added, removed, failed }) =>
+          console.log(`giphy: ${total} clips cached (+${added} −${removed}, ${failed} failed)`),
         )
-        .catch((error) => console.warn(`giphy: refresh failed, keeping the current pool: ${error}`));
+        // error.cause is where undici puts the actual reason; without it the
+        // journal just says "fetch failed".
+        .catch((error) =>
+          console.warn(
+            `giphy: refresh failed, keeping the current pool: ${error?.cause ?? error}`,
+          ),
+        )
+        .finally(() => {
+          running = false;
+        });
+    };
     void refresh();
     giphyTimer = setInterval(refresh, 24 * 60 * 60 * 1000);
   }
@@ -715,6 +747,9 @@ export async function startServer(port: number, options: Options = {}) {
         clearInterval(scheduler);
         clearInterval(reconciliation);
         if (giphyTimer) clearInterval(giphyTimer);
+        // Stop an in-flight refresh before it writes or deletes anything else.
+        giphyAbort.abort();
+        void giphyInFlight;
         for (const client of wss.clients) client.terminate();
         http.close(() => resolve());
       }),
