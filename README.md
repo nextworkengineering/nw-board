@@ -103,5 +103,12 @@ git — drop them there yourself; without one the board falls back to that event
 8-bit jingle. Clips only play for people on the `names` map — a bot or an unmapped
 login gets the jingle, so adding a teammate to the map is what opts them in.
 
+Celebration clips: drop `.gif`/`.webp` files into `public/celebrations/` and a
+merge takeover shows one at random in the trophy slot (the WWE-gif move). The
+folder is gitignored like the sounds — the clips are somebody's copyrighted
+footage, so they live only on the machine running the board. No folder or no
+files means the pixel trophy carries the takeover, same as ever. Drop-ins are
+picked up per merge, no restart needed.
+
 Secrets live only in `/etc/pr-arcade.env` on the Pi
 (`PORT`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_TOKEN`).

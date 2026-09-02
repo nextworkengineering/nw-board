@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
@@ -273,6 +273,25 @@ export async function startServer(port: number, options: Options = {}) {
   };
 
   const app = express();
+
+  // Celebration clips for the merged takeover. Like the event sounds, the files
+  // are gitignored (drop .gif/.webp into public/celebrations yourself); the
+  // client asks what's there and falls back to the trophy when the answer is
+  // nothing. Read per request so a drop-in needs no restart. Registered before
+  // express.static, which would otherwise answer for the real directory of the
+  // same name with a redirect.
+  app.get("/celebrations", (_req, res) => {
+    let files: string[] = [];
+    try {
+      files = readdirSync(fileURLToPath(new URL("../public/celebrations", import.meta.url)))
+        .filter((f) => /\.(gif|webp|png|apng)$/i.test(f))
+        .sort();
+    } catch {
+      // No folder yet — an empty list is the answer, not an error.
+    }
+    res.json(files);
+  });
+
   app.use(express.static(fileURLToPath(new URL("../public", import.meta.url))));
   const http = createServer(app);
   const wss = new WebSocketServer({ server: http });

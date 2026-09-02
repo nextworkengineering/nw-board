@@ -13,6 +13,8 @@
 import {
   Application,
   Container,
+  Filter,
+  GlProgram,
   Graphics,
   Sprite,
   Text,
@@ -101,7 +103,17 @@ const app = new Application();
 // window would quadruple the pixels the Pi pushes per frame, which lands it under
 // Pixi's 10fps clock clamp and everything plays in slow motion. The finished 2MP
 // frame is scaled to the screen by CSS instead; `pixelated` keeps the chunky look.
-await app.init({ background: C.bg, antialias: false, width: W, height: H, resolution: 1 });
+// preference "webgl": the ground shader ships a GlProgram only, and the Pi is
+// WebGL regardless — pinning it keeps the Mac (where Chrome would pick WebGPU)
+// on the same code path as the TV.
+await app.init({
+  background: C.bg,
+  antialias: false,
+  width: W,
+  height: H,
+  resolution: 1,
+  preference: "webgl",
+});
 document.body.appendChild(app.canvas);
 app.canvas.style.position = "absolute";
 app.canvas.style.imageRendering = "pixelated";
@@ -359,7 +371,71 @@ function pixelSprite(name, scale = 6, tint) {
 // scanlines and one slow roll band that move — the only per-frame background work.
 // --------------------------------------------------------------------------------
 
+// The ground shader: slow-drifting value noise that lifts the leather ground
+// partway toward the raised panel tone — warm phosphor clouds, not a gradient
+// and never a second hue. Colors arrive as uniforms from C; the GLSL holds no
+// values of its own. ?flat skips it entirely (Pi troubleshooting).
+const FLAT = location.search.includes("flat");
+const rgb = (n) => [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+let groundShader = null;
+if (!FLAT) {
+  const vertex = `
+    attribute vec2 aPosition;
+    varying vec2 vTextureCoord;
+    uniform vec4 uInputSize;
+    uniform vec4 uOutputFrame;
+    uniform vec4 uOutputTexture;
+    void main(void) {
+      gl_Position = vec4(aPosition * 2.0 - 1.0, 0.0, 1.0);
+      vTextureCoord = aPosition;
+    }
+  `;
+  const fragment = `
+    precision mediump float;
+    varying vec2 vTextureCoord;
+    uniform float uTime;
+    uniform float uStrength;
+    uniform vec3 uGround;
+    uniform vec3 uGlow;
+    float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    float noise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      vec2 u = f * f * (3.0 - 2.0 * f);
+      return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
+                 mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
+    }
+    void main(void) {
+      vec2 p = vTextureCoord * vec2(1.78, 1.0);
+      float n = noise(p * 3.0 + vec2(uTime * 0.020, uTime * 0.013));
+      n += 0.5 * noise(p * 7.0 - vec2(uTime * 0.011, uTime * 0.007));
+      n /= 1.5;
+      gl_FragColor = vec4(mix(uGround, uGlow, n * uStrength), 1.0);
+    }
+  `;
+  groundShader = new Filter({
+    glProgram: new GlProgram({ vertex, fragment }),
+    resources: {
+      groundUniforms: {
+        uTime: { value: 0, type: "f32" },
+        uStrength: { value: 0.35, type: "f32" },
+        uGround: { value: rgb(C.bg), type: "vec3<f32>" },
+        uGlow: { value: rgb(C.panel), type: "vec3<f32>" },
+      },
+    },
+  });
+}
+
 function buildBackground() {
+  if (groundShader) {
+    const ground = new Sprite(dotTexture());
+    ground.width = W;
+    ground.height = H;
+    ground.filters = [groundShader];
+    ground.eventMode = "none";
+    layers.back.addChild(ground);
+  }
+
   const stars = new Graphics();
   for (let i = 0; i < 140; i++) {
     const x = Math.random() * W;
@@ -782,6 +858,47 @@ function stepParticles(pieces, delta, gravity = 0.18) {
 // other rather than fighting over the middle of the screen.
 // --------------------------------------------------------------------------------
 
+// Celebration clips (the WWE gifs): the canvas can't play a gif, so a clip
+// rides a DOM <img> above it, placed with the same fit math the canvas uses.
+// The list comes from the server at boot (gitignored drop-in folder, same deal
+// as the event sounds); empty list means the trophy carries the takeover alone.
+const celebrationClips = { list: [] };
+fetch("/celebrations")
+  .then((r) => r.json())
+  .then((list) => {
+    if (Array.isArray(list)) celebrationClips.list = list;
+  })
+  .catch(() => {});
+
+function showCelebrationClip(durationMs) {
+  const list = celebrationClips.list;
+  if (!list.length) return false;
+  const pick = list[Math.floor(Math.random() * list.length)];
+  const img = document.createElement("img");
+  img.src = `/celebrations/${encodeURIComponent(pick)}`;
+  // Design-space box in the trophy slot, above the banner.
+  const bw = 640;
+  const bh = 340;
+  const scale = Math.min(innerWidth / W, innerHeight / H);
+  const left = (innerWidth - W * scale) / 2;
+  const top = (innerHeight - H * scale) / 2;
+  img.style.position = "absolute";
+  img.style.zIndex = "10";
+  img.style.objectFit = "cover";
+  img.style.width = `${Math.round(bw * scale)}px`;
+  img.style.height = `${Math.round(bh * scale)}px`;
+  img.style.left = `${Math.round(left + (W / 2 - bw / 2) * scale)}px`;
+  img.style.top = `${Math.round(top + (230 - bh / 2) * scale)}px`;
+  img.style.border = `${Math.max(2, Math.round(4 * scale))}px solid #${C.panelEdge.toString(16).padStart(6, "0")}`;
+  img.style.borderRadius = `${Math.round(10 * scale)}px`;
+  img.style.background = `#${C.bg.toString(16).padStart(6, "0")}`;
+  // A broken file must not leave an empty frame on the TV for five seconds.
+  img.addEventListener("error", () => img.remove());
+  document.body.appendChild(img);
+  setTimeout(() => img.remove(), durationMs);
+  return true;
+}
+
 const pending = [];
 let takeoverBusy = false;
 
@@ -855,8 +972,11 @@ function mergedTakeover(event, done) {
     "merged by",
   );
 
+  // A dropped-in clip takes the trophy slot; no clips, the trophy keeps its job.
+  const showedClip = showCelebrationClip(5000);
   const trophy = pixelSprite("trophy16", 7);
   trophy.position.set(W / 2, H / 2 - 240);
+  trophy.visible = !showedClip;
   scene.addChild(trophy);
 
   const confetti = particles(scene, 110, () => {
@@ -1128,6 +1248,7 @@ app.ticker.add((ticker) => {
     bulbs[i].alpha = 0.25 + 0.75 * (0.5 + 0.5 * Math.sin(chase - i * 0.5));
   rollBand.y = ((rollBand.y + ticker.deltaTime * 1.6) % (H + 200)) - 100;
   insertCoin.alpha = Math.floor(phase / 600) % 2 ? 0.25 : 1;
+  if (groundShader) groundShader.resources.groundUniforms.uniforms.uTime = phase / 1000;
 
   // Lead-change juice: scale decays every frame (cheap), but the fill is set twice —
   // re-rasterising 92px text every frame is not something the Pi needs to do.
