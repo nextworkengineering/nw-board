@@ -425,10 +425,12 @@ marquee.addChild(
   new Graphics()
     .roundRect(0, 0, 1872, 168, 14)
     .fill({ color: C.panelDeep })
-    .stroke({ width: 5, color: C.magenta }),
+    .stroke({ width: 5, color: C.panelEdge }),
 );
 
-const title = label("NEXTWORK ARCADE", 62, C.magenta, {
+// Paper on dark, not an accent: the hero recedes into the cabinet and lets the
+// canary bulbs and MVP name carry the marquee's 5% of color.
+const title = label("NEXTWORK ARCADE", 62, C.ink, {
   dropShadow: { color: C.bg, distance: 4, blur: 0, angle: Math.PI / 4, alpha: 0.9 },
 });
 title.position.set(48, 52);
@@ -1078,7 +1080,7 @@ function chime(at = "") {
       ? `CONGRATULATIONS TO TODAY'S MVP${currentMvp.names.length > 1 ? "S" : ""}, ${currentMvp.names.map((n) => String(n).toUpperCase()).join(" & ")} — YOU CRUSHED IT!`
       : null;
 
-  const banner = label(headline, 54, C.magenta, {
+  const banner = label(headline, 54, C.ink, {
     dropShadow: { color: C.bg, distance: 4, blur: 0, angle: Math.PI / 4, alpha: 1 },
   });
   const stand = label(standCall, 38, C.ink);
