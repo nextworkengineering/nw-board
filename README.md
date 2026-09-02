@@ -31,6 +31,22 @@ GITHUB_WEBHOOK_SECRET=dev npm start   # http://localhost:3000
 npm test   # vitest, covers webhook handling, backfill, MVP, sound rules
 ```
 
+## Brand tokens
+
+Colors come from the NextWork brand kernel, pinned as the `kernel/` git
+submodule and compiled into `public/kernel-tokens.gen.js` (committed, so the
+Pi never needs the submodule). After a fresh clone, tests need it:
+
+```sh
+git submodule update --init kernel
+```
+
+To take a newer kernel: bump the submodule, `npm run kernel:sync`, commit the
+regenerated file. `npm run kernel:check` (also part of `npm test`) fails when
+the committed tokens drift from the submodule. `scripts/sync-kernel.mjs` is
+the only writer — never hand-edit the generated file. Brand fonts are vendored
+woff2 in `public/fonts/`; type scale, radii and spacing stay app-local.
+
 ## Update the deployed board
 
 ```sh
