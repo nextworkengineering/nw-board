@@ -18,24 +18,32 @@ import {
   Texture,
 } from "./vendor/pixi.min.mjs";
 import { play, resumeAudio } from "./audio.js";
+import { KERNEL } from "./kernel-tokens.gen.js";
 
 // The scene is authored at 1080p and scaled to fit whatever the TV reports, so the
 // layout is fixed numbers rather than a responsive system nobody will ever resize.
 const W = 1920;
 const H = 1080;
 
+// The board's semantic palette, resolved from the brand kernel. Names stay
+// arcade-local; values come from kernel-tokens.gen.js only. The dark ground is
+// the kernel's leather-warm dark family — never blue-black. Accents follow the
+// categorical convention; red and plum ride the 400 rungs because their 500s
+// fall under 4.5:1 against leather at TV distance.
 const C = {
-  bg: 0x0b0b1a,
-  panel: 0x141433,
-  panelEdge: 0x2b2b6b,
-  ink: 0x9fe8ff,
-  dim: 0x5b6ba8,
-  amber: 0xffe066,
-  green: 0x66ddaa,
-  red: 0xff5c7a,
-  magenta: 0xff7ce5,
-  orange: 0xff9a3c,
-  white: 0xffffff,
+  bg: KERNEL["surface-dark"],
+  panel: KERNEL["surface-dark-raised"],
+  panelDeep: KERNEL["brand-900"],
+  panelEdge: KERNEL["brand-700"],
+  ink: KERNEL["text-on-dark"],
+  dim: KERNEL["text-on-dark-muted"],
+  amber: KERNEL["accent-canary"],
+  green: KERNEL["accent-emerald"],
+  red: KERNEL["error-400"],
+  magenta: KERNEL["plum-400"],
+  orange: KERNEL["accent-pumpkin"],
+  info: KERNEL["information-400"],
+  white: KERNEL["warm-white"],
 };
 
 const FONT = 'ui-monospace, "DejaVu Sans Mono", "Courier New", monospace';
@@ -45,7 +53,7 @@ const label = (text, fontSize, fill, extra) =>
 const EVENTS = {
   "pr-merged": { name: "MERGED", color: C.amber, icon: "trophy" },
   "review-approved": { name: "APPROVED", color: C.green, icon: "check" },
-  "pr-opened": { name: "OPENED", color: C.ink, icon: "rocket" },
+  "pr-opened": { name: "OPENED", color: C.info, icon: "rocket" },
   "pr-closed": { name: "CLOSED", color: C.dim, icon: "crate" },
   "changes-requested": { name: "CHANGES", color: C.red, icon: "bang" },
   "pr-comment": { name: "COMMENT", color: C.magenta, icon: "bubble" },
@@ -87,10 +95,7 @@ if (location.search.includes("fps")) {
   } catch {
     rendererName = "webgpu";
   }
-  const fpsText = new Text({
-    text: "",
-    style: { fontFamily: "monospace", fontSize: 26, fill: 0x00ff88 },
-  });
+  const fpsText = label("", 26, C.green);
   fpsText.position.set(8, 8);
   fpsText.zIndex = 1000;
   app.stage.addChild(fpsText);
@@ -120,8 +125,8 @@ const PX = {
   b: C.ink,
   r: C.red,
   m: C.magenta,
-  d: 0x3a3a6a,
-  k: 0x0b0b1a,
+  d: KERNEL["brand-600"],
+  k: C.bg,
 };
 
 const SPRITES = {
@@ -285,7 +290,7 @@ function pixelTexture(name) {
       }
     }),
   );
-  ctx.fillStyle = "#05050f";
+  ctx.fillStyle = `#${C.bg.toString(16).padStart(6, "0")}`;
   rows.forEach((row, y) =>
     [...row].forEach((char, x) => {
       if (
@@ -337,8 +342,10 @@ function buildBackground() {
   // Scanlines: 270 dark rows in one static Graphics, drawn over the board so the
   // panels get the CRT texture too.
   const scanlines = new Graphics();
+  // Leather rather than black: dimming toward the ground color keeps every
+  // darkened pixel in the warm family. Leather is lighter, so the alpha rises.
   for (let y = 0; y < H; y += 4) scanlines.rect(0, y, W, 2);
-  scanlines.fill({ color: 0x000000, alpha: 0.22 });
+  scanlines.fill({ color: C.bg, alpha: 0.3 });
   scanlines.eventMode = "none";
   world.addChild(scanlines);
 
@@ -382,12 +389,12 @@ layers.board.addChild(marquee);
 marquee.addChild(
   new Graphics()
     .roundRect(0, 0, 1872, 168, 14)
-    .fill({ color: 0x1a0f2e })
+    .fill({ color: C.panelDeep })
     .stroke({ width: 5, color: C.magenta }),
 );
 
 const title = label("NEXTWORK ARCADE", 62, C.magenta, {
-  dropShadow: { color: C.ink, distance: 4, blur: 0, angle: Math.PI / 4, alpha: 0.9 },
+  dropShadow: { color: C.bg, distance: 4, blur: 0, angle: Math.PI / 4, alpha: 0.9 },
 });
 title.position.set(48, 52);
 marquee.addChild(title);
@@ -513,7 +520,7 @@ tickerStrip.addChild(
 );
 const tickerContent = new Container();
 // The scroll is clipped to the frame so segments don't poke into the margins.
-const tickerMask = new Graphics().roundRect(26, TICKER_Y, 1868, TICKER_H, 10).fill(0xffffff);
+const tickerMask = new Graphics().roundRect(26, TICKER_Y, 1868, TICKER_H, 10).fill(C.white);
 tickerStrip.addChild(tickerMask, tickerContent);
 tickerContent.mask = tickerMask;
 layers.board.addChild(tickerStrip);
@@ -769,12 +776,14 @@ function takeoverScene(headline, color, event, verb) {
   const dim = new Sprite(dotTexture());
   dim.width = W;
   dim.height = H;
-  dim.tint = 0x000000;
+  // Dim toward leather, not black: knocking the board back to the ground color
+  // is the warm-dark move, and a black wash cools every pixel under it.
+  dim.tint = C.bg;
   dim.alpha = 0;
   scene.addChild(dim);
 
   const banner = label(headline, 132, color, {
-    dropShadow: { color: 0x000000, distance: 6, blur: 0, angle: Math.PI / 4, alpha: 1 },
+    dropShadow: { color: C.bg, distance: 6, blur: 0, angle: Math.PI / 4, alpha: 1 },
   });
   banner.anchor.set(0.5);
   banner.position.set(W / 2, H / 2 - 60);
@@ -845,7 +854,7 @@ function mergedTakeover(event, done) {
     scene,
     5000,
     (progress, elapsed, delta) => {
-      dim.alpha = Math.min(progress * 4, 0.75) * (progress > 0.85 ? (1 - progress) / 0.15 : 1);
+      dim.alpha = Math.min(progress * 4, 0.85) * (progress > 0.85 ? (1 - progress) / 0.15 : 1);
       banner.scale.set(Math.min(elapsed / 220, 1) * (1 + Math.sin(elapsed / 160) * 0.06));
       banner.y = H / 2 - 60 + Math.sin(elapsed / 200) * 18;
       caption.alpha = Math.min(elapsed / 400, 1);
@@ -899,7 +908,7 @@ function approvedTakeover(event, done) {
     scene,
     5000,
     (progress, elapsed, delta) => {
-      dim.alpha = Math.min(progress * 5, 0.7) * (progress > 0.85 ? (1 - progress) / 0.15 : 1);
+      dim.alpha = Math.min(progress * 5, 0.8) * (progress > 0.85 ? (1 - progress) / 0.15 : 1);
       // The stamp drops fast, overshoots, settles.
       const drop = Math.min(elapsed / 320, 1);
       stamp.scale.set(24 - 12 * drop + Math.sin(drop * Math.PI) * 4);
@@ -1034,7 +1043,7 @@ function chime(at = "") {
       : null;
 
   const banner = label(headline, 54, C.magenta, {
-    dropShadow: { color: 0x000000, distance: 4, blur: 0, angle: Math.PI / 4, alpha: 1 },
+    dropShadow: { color: C.bg, distance: 4, blur: 0, angle: Math.PI / 4, alpha: 1 },
   });
   const stand = label(standCall, 38, C.ink);
   const congrats = congratsText ? label(congratsText, 38, C.amber) : null;
@@ -1044,8 +1053,8 @@ function chime(at = "") {
   backing.anchor.set(0.5);
   backing.width = W;
   backing.height = congrats ? 300 : 230;
-  backing.tint = 0x000000;
-  backing.alpha = 0.75;
+  backing.tint = C.bg;
+  backing.alpha = 0.85;
   backing.position.set(W / 2, H / 2);
   scene.addChild(backing);
   rows.forEach((row, i) => {
