@@ -9,6 +9,13 @@ export const KERNEL_META = {
   "syncedAt": "2026-09-01"
 };
 
+// public/brand/nextwork-lockup-on-dark.svg, copied byte for byte from the kernel
+// master named below. Verify: shasum -a 256 public/brand/nextwork-lockup-on-dark.svg
+export const KERNEL_LOGO = {
+  "master": "agent/visual/assets/logos/Paper lock up - full.svg",
+  "sha256": "29b257a3eb8af4dc4d8fb1af30895c1134062188d2fb11b9ea2b79cd2772e6cf"
+};
+
 export const KERNEL = {
   "white": 0xffffff,
   "warm-white": 0xfdfbf9,

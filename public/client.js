@@ -12,6 +12,7 @@
 // with the network down. `npm ci` (install and deploy both run it) provides the target.
 import {
   Application,
+  Assets,
   Container,
   Graphics,
   Sprite,
@@ -469,6 +470,44 @@ const bulbs = Array.from({ length: 44 }, (_, i) => {
   marquee.addChild(bulb);
   return bulb;
 });
+
+// The real NextWork lockup takes the hero slot once it loads. The file is the
+// kernel's own master, copied byte for byte and hash-pinned by
+// scripts/sync-kernel.mjs, because the mark is never redrawn, recoloured or
+// re-typeset — the wordmark in it is outlined paths, not text in a font.
+//
+// 66px is the tallest the lockup can be here: the brand rule is clear space of
+// half the roundel's height on every side, the roundel spans the lockup's full
+// height, and the bulb rows sit at y 4.4-15.6 and y 152.4-163.6. Centred on the
+// bulb midpoint (84), that caps the height at 68.4.
+const LOGO_HEIGHT = 66;
+Assets.load({
+  src: "/brand/nextwork-lockup-on-dark.svg",
+  // Rasterise at an exact half of the master (gcd(1168,242) = 2, so the aspect
+  // stays bit-identical). The sprite draws ~318px wide, so rasterising at the
+  // full 1168 would minify 3.7:1 through a two-tap filter and mush the roundel's
+  // ~2px negative-space gaps.
+  data: { width: 584, height: 121 },
+})
+  .then((texture) => {
+    // Must be set before the texture first renders.
+    texture.source.autoGenerateMipmaps = true;
+    const logo = new Sprite(texture);
+    logo.anchor.set(0, 0.5);
+    // One scalar, so the scale cannot go non-uniform: stretching the mark is a
+    // hard block, and setting width and height separately invites exactly that.
+    logo.scale.set(LOGO_HEIGHT / texture.height);
+    logo.position.set(48, 84);
+    marquee.addChild(logo);
+    title.visible = false;
+    // Clear of the logo's right-hand clear space, which ends at 399.5.
+    insertCoin.anchor.set(0, 0.5);
+    insertCoin.position.set(412, 84);
+  })
+  .catch(() => {
+    // No logo on disk: the typed title stays exactly where it is. A missing file
+    // must never leave the hero empty on a TV with no keyboard.
+  });
 
 // --------------------------------------------------------------------------------
 // Feed panel: the last 24h of tracked events, newest at the top.
