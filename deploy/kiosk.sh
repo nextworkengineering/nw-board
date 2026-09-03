@@ -47,16 +47,37 @@ if command -v xset >/dev/null 2>&1; then
   xset s off -dpms s noblank || true
 fi
 
-# Hide the mouse pointer. The page already asks for none (CSS cursor:none), but
-# the arrow Chromium shows while the page is still loading comes from the cursor
-# theme — and under Wayland unclutter can't touch it. deploy/blank-cursor is a
-# theme whose every cursor is one transparent pixel; both libwayland-cursor and
-# libXcursor read these env vars, so no session type ever draws an arrow.
+# Hide the mouse pointer. Three layers, because each only covers one case:
+#
+# 1. The page asks for none (CSS cursor:none) — but that only reaches the
+#    compositor once a pointer enters the window, and the office Pi has no mouse
+#    at all. labwc still paints its arrow with no device behind it, so ask labwc
+#    itself: a window rule runs HideCursor when the kiosk window maps (labwc
+#    0.8.4+). Scoped to Chromium; a real mouse still shows a cursor elsewhere.
+#    labwc re-reads rc.xml on SIGHUP, so this takes effect before Chromium
+#    starts. Without --merge-config a user rc.xml shadows the system one, so
+#    start from a copy of it.
+# 2. deploy/blank-cursor (every cursor one transparent pixel) via XCURSOR_* for
+#    the arrow Chromium draws itself while the page loads, on wayfire/X11.
+# 3. unclutter for X11 sessions: hides the pointer even off the Chromium window.
+#    Dies with the service (same cgroup); a no-op under Wayland.
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RC="${XDG_CONFIG_HOME:-$HOME/.config}/labwc/rc.xml"
+if command -v labwc >/dev/null 2>&1 && ! grep -qs HideCursor "$RC"; then
+  install -d "$(dirname "$RC")"
+  if [ ! -f "$RC" ] && [ -f /etc/xdg/labwc/rc.xml ]; then cp /etc/xdg/labwc/rc.xml "$RC"; fi
+  RULE='  <windowRule identifier="chromium*"><action name="HideCursor" /></windowRule>'
+  if grep -q '<windowRules>' "$RC" 2>/dev/null; then
+    sed -i "/<windowRules>/a\\$RULE" "$RC"
+  elif grep -q '</labwc_config>' "$RC" 2>/dev/null; then
+    sed -i "s|</labwc_config>|<windowRules>\\n$RULE\\n</windowRules>\\n</labwc_config>|" "$RC"
+  else
+    printf '<?xml version="1.0"?>\n<labwc_config>\n<windowRules>\n%s\n</windowRules>\n</labwc_config>\n' "$RULE" >"$RC"
+  fi
+  pkill -HUP -x labwc || true
+fi
 export XCURSOR_THEME=blank-cursor
 export XCURSOR_PATH="$DEPLOY_DIR:/usr/share/icons:$HOME/.local/share/icons"
-# X11 belt-and-braces: hides the pointer even off the Chromium window. Dies with
-# the service (same cgroup); a no-op under Wayland.
 if command -v unclutter >/dev/null 2>&1; then
   unclutter -idle 0 &
 fi

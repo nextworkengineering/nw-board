@@ -10,7 +10,7 @@ Everything needed to get from a blank SD card to a TV showing the board.
 | `pr-arcade-kiosk.service` | User unit for the Chromium kiosk. Starts with the Pi's autologin desktop session. |
 
 Both units deliberately omit `User`/`WorkingDirectory`/`ExecStart` — `install.sh` writes those into systemd drop-ins from the actual checkout, user and `npm` path, so there's one source of truth and no templating. A unit without its drop-in refuses to start rather than running something wrong.
-| `kiosk.sh` | What the kiosk unit runs: wait for the server, kill the cursor and blanking, launch Chromium fullscreen. |
+| `kiosk.sh` | What the kiosk unit runs: wait for the server, kill the cursor and blanking, launch Chromium fullscreen. On labwc it adds a window rule to `~/.config/labwc/rc.xml` that hides the pointer when the Chromium window opens (the Pi has no mouse, so the page's own `cursor: none` never fires). |
 | `deploy.sh` | The one-command update: pull, reinstall deps if they changed, restart. |
 | `blank-cursor/` | Xcursor theme where every cursor is one transparent pixel — `kiosk.sh` points Chromium at it so no arrow ever shows on the TV (unclutter can't do this under Wayland). Regenerate with `make-blank-cursor.py`. |
 
