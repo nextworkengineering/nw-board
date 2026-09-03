@@ -110,14 +110,5 @@ footage, so they live only on the machine running the board. No folder or no
 files means the pixel trophy carries the takeover, same as ever. Drop-ins are
 picked up per merge, no restart needed.
 
-With a `GIPHY_API_KEY` set, the server also keeps `public/celebrations/giphy/`
-stocked from the Giphy search API — one pull at boot and one a day after,
-always onto local disk, so a takeover never waits on the network and a dead
-network just replays the last pool. `celebrationGifs` in `config.json` sets
-the search (`query`, default `"wwe"`) and pool size (`limit`, default 20);
-clips fetched this way carry a small "via GIPHY" credit on screen. No key
-means no fetch, and hand-dropped clips work either way. Free key:
-developers.giphy.com.
-
 Secrets live only in `/etc/pr-arcade.env` on the Pi
-(`PORT`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_TOKEN`, `GIPHY_API_KEY` optional).
+(`PORT`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_TOKEN`).

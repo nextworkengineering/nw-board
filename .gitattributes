@@ -1,0 +1,4 @@
+# The vendored logo is hash-pinned against the kernel master, so its bytes must
+# survive checkout unchanged. Without this a contributor with core.autocrlf=true
+# gets CRLF and fails the gate on a file nobody edited.
+*.svg -text

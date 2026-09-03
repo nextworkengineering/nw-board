@@ -12,9 +12,8 @@
 // with the network down. `npm ci` (install and deploy both run it) provides the target.
 import {
   Application,
+  Assets,
   Container,
-  Filter,
-  GlProgram,
   Graphics,
   Sprite,
   Text,
@@ -103,17 +102,7 @@ const app = new Application();
 // window would quadruple the pixels the Pi pushes per frame, which lands it under
 // Pixi's 10fps clock clamp and everything plays in slow motion. The finished 2MP
 // frame is scaled to the screen by CSS instead; `pixelated` keeps the chunky look.
-// preference "webgl": the ground shader ships a GlProgram only, and the Pi is
-// WebGL regardless — pinning it keeps the Mac (where Chrome would pick WebGPU)
-// on the same code path as the TV.
-await app.init({
-  background: C.bg,
-  antialias: false,
-  width: W,
-  height: H,
-  resolution: 1,
-  preference: "webgl",
-});
+await app.init({ background: C.bg, antialias: false, width: W, height: H, resolution: 1 });
 document.body.appendChild(app.canvas);
 app.canvas.style.position = "absolute";
 app.canvas.style.imageRendering = "pixelated";
@@ -371,70 +360,7 @@ function pixelSprite(name, scale = 6, tint) {
 // scanlines and one slow roll band that move — the only per-frame background work.
 // --------------------------------------------------------------------------------
 
-// The ground shader: slow-drifting value noise that lifts the leather ground
-// partway toward the raised panel tone — warm phosphor clouds, not a gradient
-// and never a second hue. Colors arrive as uniforms from C; the GLSL holds no
-// values of its own. ?flat skips it entirely (Pi troubleshooting).
-const FLAT = location.search.includes("flat");
-const rgb = (n) => [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
-let groundShader = null;
-if (!FLAT) {
-  const vertex = `
-    attribute vec2 aPosition;
-    varying vec2 vTextureCoord;
-    uniform vec4 uInputSize;
-    uniform vec4 uOutputFrame;
-    uniform vec4 uOutputTexture;
-    void main(void) {
-      gl_Position = vec4(aPosition * 2.0 - 1.0, 0.0, 1.0);
-      vTextureCoord = aPosition;
-    }
-  `;
-  const fragment = `
-    precision mediump float;
-    varying vec2 vTextureCoord;
-    uniform float uTime;
-    uniform float uStrength;
-    uniform vec3 uGround;
-    uniform vec3 uGlow;
-    float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-    float noise(vec2 p) {
-      vec2 i = floor(p);
-      vec2 f = fract(p);
-      vec2 u = f * f * (3.0 - 2.0 * f);
-      return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
-                 mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
-    }
-    void main(void) {
-      vec2 p = vTextureCoord * vec2(1.78, 1.0);
-      float n = noise(p * 3.0 + vec2(uTime * 0.020, uTime * 0.013));
-      n += 0.5 * noise(p * 7.0 - vec2(uTime * 0.011, uTime * 0.007));
-      n /= 1.5;
-      gl_FragColor = vec4(mix(uGround, uGlow, n * uStrength), 1.0);
-    }
-  `;
-  groundShader = new Filter({
-    glProgram: new GlProgram({ vertex, fragment }),
-    resources: {
-      groundUniforms: {
-        uTime: { value: 0, type: "f32" },
-        uStrength: { value: 0.35, type: "f32" },
-        uGround: { value: rgb(C.bg), type: "vec3<f32>" },
-        uGlow: { value: rgb(C.panel), type: "vec3<f32>" },
-      },
-    },
-  });
-}
-
 function buildBackground() {
-  if (groundShader) {
-    const ground = new Sprite(dotTexture());
-    ground.width = W;
-    ground.height = H;
-    ground.filters = [groundShader];
-    ground.eventMode = "none";
-    layers.back.addChild(ground);
-  }
 
   const stars = new Graphics();
   for (let i = 0; i < 140; i++) {
@@ -483,7 +409,7 @@ function panel(x, y, width, height, title, titleColor) {
     .roundRect(0, 0, width, 56, 10)
     .fill({ color: C.panelEdge, alpha: 0.55 });
   box.addChild(bar);
-  const heading = label(title, 30, titleColor);
+  const heading = label(title, 34, titleColor);
   heading.position.set(20, 12);
   box.addChild(heading);
   layers.board.addChild(box);
@@ -512,11 +438,11 @@ const title = label("NEXTWORK ARCADE", 62, C.ink, {
 title.position.set(48, 52);
 marquee.addChild(title);
 
-const insertCoin = label("INSERT PULL REQUEST", 20, C.dim);
+const insertCoin = label("INSERT PULL REQUEST", 24, C.dim);
 insertCoin.position.set(52, 118);
 marquee.addChild(insertCoin);
 
-const mvpCaption = label("TODAY'S MVP", 34, C.ink);
+const mvpCaption = label("TODAY'S MVP", 38, C.ink);
 mvpCaption.anchor.set(1, 0);
 mvpCaption.position.set(1824, 26);
 marquee.addChild(mvpCaption);
@@ -545,6 +471,44 @@ const bulbs = Array.from({ length: 44 }, (_, i) => {
   return bulb;
 });
 
+// The real NextWork lockup takes the hero slot once it loads. The file is the
+// kernel's own master, copied byte for byte and hash-pinned by
+// scripts/sync-kernel.mjs, because the mark is never redrawn, recoloured or
+// re-typeset — the wordmark in it is outlined paths, not text in a font.
+//
+// 66px is the tallest the lockup can be here: the brand rule is clear space of
+// half the roundel's height on every side, the roundel spans the lockup's full
+// height, and the bulb rows sit at y 4.4-15.6 and y 152.4-163.6. Centred on the
+// bulb midpoint (84), that caps the height at 68.4.
+const LOGO_HEIGHT = 66;
+Assets.load({
+  src: "/brand/nextwork-lockup-on-dark.svg",
+  // Rasterise at an exact half of the master (gcd(1168,242) = 2, so the aspect
+  // stays bit-identical). The sprite draws ~318px wide, so rasterising at the
+  // full 1168 would minify 3.7:1 through a two-tap filter and mush the roundel's
+  // ~2px negative-space gaps.
+  data: { width: 584, height: 121 },
+})
+  .then((texture) => {
+    // Must be set before the texture first renders.
+    texture.source.autoGenerateMipmaps = true;
+    const logo = new Sprite(texture);
+    logo.anchor.set(0, 0.5);
+    // One scalar, so the scale cannot go non-uniform: stretching the mark is a
+    // hard block, and setting width and height separately invites exactly that.
+    logo.scale.set(LOGO_HEIGHT / texture.height);
+    logo.position.set(48, 84);
+    marquee.addChild(logo);
+    title.visible = false;
+    // Clear of the logo's right-hand clear space, which ends at 399.5.
+    insertCoin.anchor.set(0, 0.5);
+    insertCoin.position.set(412, 84);
+  })
+  .catch(() => {
+    // No logo on disk: the typed title stays exactly where it is. A missing file
+    // must never leave the hero empty on a TV with no keyboard.
+  });
+
 // --------------------------------------------------------------------------------
 // Feed panel: the last 24h of tracked events, newest at the top.
 // --------------------------------------------------------------------------------
@@ -553,7 +517,7 @@ const FEED_ROWS = 12;
 const feedPanel = panel(24, 204, 1872, 756, "LIVE FEED // LAST 24H", C.ink);
 
 // Wall clock on the feed header — the board doubles as the office clock.
-const wallClock = label("", 30, C.ink);
+const wallClock = label("", 34, C.ink);
 wallClock.anchor.set(1, 0);
 wallClock.position.set(1852, 12);
 feedPanel.addChild(wallClock);
@@ -565,7 +529,7 @@ setInterval(() => {
 }, 1000);
 // The last human to deploy to dev, centred on the header: the board answers
 // "who put that on dev?" without anyone opening GitHub.
-const devDeployLabel = label("", 30, C.green);
+const devDeployLabel = label("", 34, C.green);
 devDeployLabel.anchor.set(0.5, 0);
 devDeployLabel.position.set(936, 12);
 feedPanel.addChild(devDeployLabel);
@@ -577,7 +541,7 @@ function setDevDeploy(devDeploy) {
     : "";
 }
 
-const feedEmpty = label("...WAITING FOR PLAYERS...", 26, C.dim);
+const feedEmpty = label("...WAITING FOR PLAYERS...", 30, C.dim);
 feedEmpty.position.set(24, 90);
 feedPanel.addChild(feedEmpty);
 
@@ -589,21 +553,27 @@ const feedRows = Array.from({ length: FEED_ROWS }, (_, i) => {
   row.visible = false;
   const icon = pixelSprite("star", 4);
   icon.position.set(24, 22);
-  const kind = label("", 24, C.ink);
+  const kind = label("", 28, C.ink);
   kind.position.set(56, 8);
   // First names are short, so the name and time sit tight together and the
   // title gets everything to the right of the repo pill.
-  const who = label("", 24, C.ink);
-  who.position.set(196, 8);
-  const time = label("", 24, C.dim);
-  time.position.set(420, 8);
+  // Columns sized for the 28px register: APPROVED (the widest kind) ends near
+  // x196, so the name column starts at 240 with air to spare.
+  const who = label("", 28, C.ink);
+  who.position.set(240, 8);
+  // Right-anchored: FK Grotesk's digits are proportional, so a left-anchored
+  // HH:MM column wanders by up to 30px across twelve rows. Anchoring right puts
+  // the ragged edge where the eye is not tracking a column.
+  const time = label("", 28, C.dim);
+  time.anchor.set(1, 0);
+  time.position.set(556, 8);
   // Repo pill: a small rounded chip redrawn per render (width follows the text).
   const pillBg = new Graphics();
-  const pillText = label("", 17, C.dim);
+  const pillText = label("", 20, C.dim);
   const pill = new Container();
-  pill.position.set(528, 6);
+  pill.position.set(580, 6);
   pill.addChild(pillBg, pillText);
-  const title = label("", 24, C.dim);
+  const title = label("", 28, C.dim);
   title.position.set(0, 8); // x set per render, after the pill
   row.addChild(icon, kind, who, time, pill, title);
   feedPanel.addChild(row);
@@ -647,26 +617,26 @@ function tickerSequence(openPrs) {
     seq.addChild(child);
     x += child.width + TICKER_GAP;
   };
-  const marker = label("★ NOW PLAYING ★", 28, C.green);
-  marker.position.y = TICKER_Y + 34;
+  const marker = label("★ NOW PLAYING ★", 32, C.green);
+  marker.position.y = TICKER_Y + 32;
   put(marker);
   if (!openPrs.length) {
-    const none = label("NO PRS IN FLIGHT — INSERT PULL REQUEST", 28, C.dim);
-    none.position.y = TICKER_Y + 34;
+    const none = label("NO PRS IN FLIGHT — INSERT PULL REQUEST", 32, C.dim);
+    none.position.y = TICKER_Y + 32;
     put(none);
   }
   for (const pr of openPrs) {
     const item = new Container();
-    const pillText = label(pr.repo.split("/").pop(), 20, C.green);
-    pillText.position.set(12, TICKER_Y + 38);
+    const pillText = label(pr.repo.split("/").pop(), 24, C.green);
+    pillText.position.set(14, TICKER_Y + 36);
     const pill = new Graphics()
-      .roundRect(0, TICKER_Y + 30, Math.ceil(pillText.width) + 24, 38, 8)
+      .roundRect(0, TICKER_Y + 26, Math.ceil(pillText.width) + 28, 44, 8)
       .fill({ color: C.white, alpha: 0.05 })
       .stroke({ color: C.green, alpha: 0.6, width: 2 });
-    const head = label(`#${pr.number} ${pr.actor ?? ""}`.trimEnd(), 28, C.amber);
-    head.position.set(Math.ceil(pillText.width) + 40, TICKER_Y + 34);
-    const text = label(clip(pr.title, 60), 28, C.ink);
-    text.position.set(head.position.x + head.width + 28, TICKER_Y + 34);
+    const head = label(`#${pr.number} ${pr.actor ?? ""}`.trimEnd(), 32, C.amber);
+    head.position.set(Math.ceil(pillText.width) + 46, TICKER_Y + 32);
+    const text = label(clip(pr.title, 60), 32, C.ink);
+    text.position.set(head.position.x + head.width + 28, TICKER_Y + 32);
     item.addChild(pill, pillText, head, text);
     put(item);
   }
@@ -687,6 +657,26 @@ const stamp = (event) => ({ ...event, at: event.at ?? Date.now() });
 
 const clip = (text, max) =>
   text.length > max ? `${text.slice(0, max - 1)}…` : text;
+
+/**
+ * Set `full` on a Text, trimmed with an ellipsis until it actually fits.
+ * Measured rather than estimated: with a proportional font a per-glyph guess is
+ * wrong in both directions — it wastes a fifth of a column of narrow text, and
+ * overruns the panel on wide text. Only runs on a feed render, never per frame.
+ */
+function fitText(target, full, maxWidth) {
+  target.text = full;
+  if (target.width <= maxWidth) return;
+  let lo = 0;
+  let hi = full.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    target.text = `${full.slice(0, mid)}…`;
+    if (target.width <= maxWidth) lo = mid;
+    else hi = mid - 1;
+  }
+  target.text = `${full.slice(0, lo)}…`;
+}
 const clock = (at) => new Date(at).toTimeString().slice(0, 5);
 
 function renderFeed() {
@@ -706,21 +696,16 @@ function renderFeed() {
     who.text = clip(entry.actor ?? "", 12);
     time.text = clock(entry.at);
     pillText.text = clip(entry.repo.split("/").pop(), 16);
-    pillText.position.set(10, 5);
-    const pillWidth = Math.ceil(pillText.width) + 20;
+    pillText.position.set(11, 6);
+    const pillWidth = Math.ceil(pillText.width) + 22;
     pillBg
       .clear()
-      .roundRect(0, 0, pillWidth, 30, 6)
+      .roundRect(0, 0, pillWidth, 34, 6)
       .fill({ color: C.white, alpha: 0.06 })
       .stroke({ color: C.dim, alpha: 0.7, width: 1.5 });
     // Title starts just past the pill and runs to the panel edge.
     title.position.x = pill.position.x + pillWidth + 14;
-    // 16.5px per glyph was tuned for 24px monospace; FK Grotesk runs narrower,
-    // so this clips early rather than overflowing. Tune down after a TV check.
-    title.text = clip(
-      `#${entry.number}  ${entry.title}`,
-      Math.max(0, Math.floor((1828 - title.position.x) / 16.5)),
-    );
+    fitText(title, `#${entry.number}  ${entry.title}`, 1828 - title.position.x);
     // Older entries fade toward the bottom of the panel, so the eye lands on the top.
     row.alpha = 1 - i * 0.045;
   }
@@ -863,34 +848,50 @@ function stepParticles(pieces, delta, gravity = 0.18) {
 // The list comes from the server at boot (gitignored drop-in folder, same deal
 // as the event sounds); empty list means the trophy carries the takeover alone.
 const celebrationClips = { list: [] };
-fetch("/celebrations")
-  .then((r) => r.json())
-  .then((list) => {
-    if (Array.isArray(list)) celebrationClips.list = list;
-  })
-  .catch(() => {});
+// Re-read rather than trusting the list from boot: this kiosk never reloads, so
+// a list cached at boot would never see a clip dropped in afterwards, and would
+// keep naming one that had been removed.
+function loadCelebrationClips() {
+  return fetch("/celebrations")
+    .then((r) => r.json())
+    .then((list) => {
+      if (Array.isArray(list)) celebrationClips.list = list;
+    })
+    .catch(() => {});
+}
+loadCelebrationClips();
+setInterval(loadCelebrationClips, 60 * 60 * 1000);
 
-function showCelebrationClip(durationMs) {
+/**
+ * Show a clip in the takeover's trophy slot. Returns a remove function, or null
+ * when there is nothing to show. `onFail` runs if the file turns out to be gone.
+ */
+function showCelebrationClip(maxMs, onFail) {
   const list = celebrationClips.list;
-  if (!list.length) return false;
-  // Giphy's pool lives under giphy/, so the path can carry a slash.
+  if (!list.length) return null;
   const pick = list[Math.floor(Math.random() * list.length)];
   const hex = (n) => `#${n.toString(16).padStart(6, "0")}`;
   // Design-space box in the trophy slot, above the banner.
   const bw = 640;
   const bh = 340;
-  const scale = Math.min(innerWidth / W, innerHeight / H);
-  const left = (innerWidth - W * scale) / 2;
-  const top = (innerHeight - H * scale) / 2;
   const box = document.createElement("div");
   box.style.position = "absolute";
   box.style.zIndex = "10";
-  box.style.width = `${Math.round(bw * scale)}px`;
-  box.style.height = `${Math.round(bh * scale)}px`;
-  box.style.left = `${Math.round(left + (W / 2 - bw / 2) * scale)}px`;
-  box.style.top = `${Math.round(top + (230 - bh / 2) * scale)}px`;
+  // The canvas re-fits on resize, so the clip has to follow it or an HDMI
+  // resolution change mid-takeover leaves it hanging off the frame.
+  let scale = 1;
+  const place = () => {
+    scale = Math.min(innerWidth / W, innerHeight / H);
+    const left = (innerWidth - W * scale) / 2;
+    const top = (innerHeight - H * scale) / 2;
+    box.style.width = `${Math.round(bw * scale)}px`;
+    box.style.height = `${Math.round(bh * scale)}px`;
+    box.style.left = `${Math.round(left + (W / 2 - bw / 2) * scale)}px`;
+    box.style.top = `${Math.round(top + (230 - bh / 2) * scale)}px`;
+  };
+  place();
   const img = document.createElement("img");
-  img.src = `/celebrations/${pick.split("/").map(encodeURIComponent).join("/")}`;
+  img.src = `/celebrations/${encodeURIComponent(pick)}`;
   img.style.width = "100%";
   img.style.height = "100%";
   img.style.objectFit = "cover";
@@ -899,24 +900,29 @@ function showCelebrationClip(durationMs) {
   img.style.background = hex(C.bg);
   img.style.boxSizing = "border-box";
   box.appendChild(img);
-  // Giphy's terms ask for the credit; hand-dropped clips carry none.
-  if (pick.startsWith("giphy/")) {
-    const credit = document.createElement("div");
-    credit.textContent = "via GIPHY";
-    credit.style.position = "absolute";
-    credit.style.right = "0";
-    credit.style.bottom = `${-Math.round(24 * scale)}px`;
-    credit.style.fontFamily = FONT_UI;
-    credit.style.fontWeight = "500";
-    credit.style.fontSize = `${Math.max(10, Math.round(16 * scale))}px`;
-    credit.style.color = hex(C.dim);
-    box.appendChild(credit);
-  }
-  // A broken file must not leave an empty frame on the TV for five seconds.
-  img.addEventListener("error", () => box.remove());
+  const remove = () => {
+    removeEventListener("resize", place);
+    box.remove();
+  };
+  // A file that has since been removed must not leave an empty frame on the TV:
+  // hand the slot back to the caller and re-read the list so the next merge
+  // picks from what actually exists.
+  img.addEventListener("error", () => {
+    remove();
+    loadCelebrationClips();
+    onFail?.();
+  });
+  addEventListener("resize", place);
   document.body.appendChild(box);
-  setTimeout(() => box.remove(), durationMs);
-  return true;
+  // The caller clears this when its scene ends. The timer is only a backstop:
+  // scene time is ticker time, which Pixi clamps at 100ms per frame, so on a Pi
+  // running slow a wall-clock timeout would pull the clip long before the
+  // takeover finishes.
+  const backstop = setTimeout(remove, maxMs);
+  return () => {
+    clearTimeout(backstop);
+    remove();
+  };
 }
 
 const pending = [];
@@ -968,7 +974,7 @@ function takeoverScene(headline, color, event, verb) {
     event.repo
       ? `${event.repo.split("/").pop()} #${event.number}  ${clip(event.title ?? "", 46)}`
       : "",
-    32,
+    36,
     C.ink,
   );
   caption.anchor.set(0.5);
@@ -976,7 +982,7 @@ function takeoverScene(headline, color, event, verb) {
   scene.addChild(caption);
 
   // No login means GitHub named nobody; a bare "merged by" credits no one, so skip it.
-  const credit = label(event.actor ? `${verb} ${clip(event.actor, 39)}` : "", 40, color);
+  const credit = label(event.actor ? `${verb} ${clip(event.actor, 39)}` : "", 44, color);
   credit.anchor.set(0.5);
   credit.position.set(W / 2, H / 2 + 130);
   scene.addChild(credit);
@@ -992,11 +998,14 @@ function mergedTakeover(event, done) {
     "merged by",
   );
 
-  // A dropped-in clip takes the trophy slot; no clips, the trophy keeps its job.
-  const showedClip = showCelebrationClip(5000);
+  // A dropped-in clip takes the trophy slot; no clips (or a clip whose file has
+  // since been rotated away), the trophy keeps its job.
   const trophy = pixelSprite("trophy16", 7);
   trophy.position.set(W / 2, H / 2 - 240);
-  trophy.visible = !showedClip;
+  const clip = showCelebrationClip(15_000, () => {
+    if (!trophy.destroyed) trophy.visible = true;
+  });
+  trophy.visible = !clip;
   scene.addChild(trophy);
 
   const confetti = particles(scene, 110, () => {
@@ -1043,7 +1052,10 @@ function mergedTakeover(event, done) {
       stepParticles(fireworks, delta, 0.1);
       for (const spark of fireworks) spark.alpha = 1 - progress;
     },
-    done,
+    () => {
+      clip?.();
+      done?.();
+    },
   );
 }
 
@@ -1223,8 +1235,8 @@ function chime(at = "") {
   const banner = label(headline, 54, C.ink, {
     dropShadow: { color: C.bg, distance: 4, blur: 0, angle: Math.PI / 4, alpha: 1 },
   });
-  const stand = label(standCall, 38, C.ink);
-  const congrats = congratsText ? label(congratsText, 38, C.amber) : null;
+  const stand = label(standCall, 42, C.ink);
+  const congrats = congratsText ? label(congratsText, 42, C.amber) : null;
   const rows = congrats ? [banner, stand, congrats] : [banner, stand];
 
   const backing = new Sprite(dotTexture());
@@ -1235,8 +1247,14 @@ function chime(at = "") {
   backing.alpha = 0.85;
   backing.position.set(W / 2, H / 2);
   scene.addChild(backing);
+  // A three-way MVP tie runs this line past both screen edges at 42px, so any
+  // row wider than the content width is scaled down to fit rather than clipped.
+  const fitRow = (row) => (row.width > 1840 ? 1840 / row.width : 1);
+  const bannerFit = fitRow(banner);
   rows.forEach((row, i) => {
     row.anchor.set(0.5);
+    // The banner's scale is animated below, so its fit rides along there.
+    if (row !== banner) row.scale.set(fitRow(row));
     row.position.set(W / 2, H / 2 + (i - (rows.length - 1) / 2) * 76);
     if (i > 0) row.alpha = 0;
     scene.addChild(row);
@@ -1247,7 +1265,7 @@ function chime(at = "") {
     const fade =
       progress < 0.05 ? progress / 0.05 : progress > 0.92 ? (1 - progress) / 0.08 : 1;
     scene.alpha = fade;
-    banner.scale.set(0.9 + Math.min(fade, 1) * 0.1);
+    banner.scale.set((0.9 + Math.min(fade, 1) * 0.1) * bannerFit);
     // The extra lines fade in one beat apart.
     rows.forEach((row, i) => {
       if (i > 0) row.alpha = Math.min(Math.max((elapsed - 600 * i) / 500, 0), 1) * fade;
@@ -1268,7 +1286,6 @@ app.ticker.add((ticker) => {
     bulbs[i].alpha = 0.25 + 0.75 * (0.5 + 0.5 * Math.sin(chase - i * 0.5));
   rollBand.y = ((rollBand.y + ticker.deltaTime * 1.6) % (H + 200)) - 100;
   insertCoin.alpha = Math.floor(phase / 600) % 2 ? 0.25 : 1;
-  if (groundShader) groundShader.resources.groundUniforms.uniforms.uTime = phase / 1000;
 
   // Lead-change juice: scale decays every frame (cheap), but the fill is set twice —
   // re-rasterising 92px text every frame is not something the Pi needs to do.
