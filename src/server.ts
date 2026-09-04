@@ -152,7 +152,8 @@ export async function startServer(port: number, options: Options = {}) {
 
   // The Feed: every tracked domain event from the last 24 hours, oldest first.
   const feed: { at: number; event: DomainEvent }[] = [];
-  const DAY_MS = 24 * 60 * 60 * 1000;
+  const HOUR_MS = 60 * 60 * 1000;
+  const DAY_MS = 24 * HOUR_MS;
   const currentFeed = () => {
     while (feed.length && now() - feed[0]!.at >= DAY_MS) feed.shift();
     // Each entry carries the timestamp it was recorded at, so a display expires it
@@ -248,7 +249,7 @@ export async function startServer(port: number, options: Options = {}) {
 
   // The last human to deploy to dev: board state like the MVP, not a Feed event, so
   // a newer deploy replaces it and nothing expires.
-  let devDeploy: { actor: string; at: number } | null = null;
+  let devDeploy: { actor: string; at: number; repo: string; run: number } | null = null;
 
   /**
    * A successful run of the configured deploy workflow, credited to whoever triggered
@@ -268,8 +269,41 @@ export async function startServer(port: number, options: Options = {}) {
     const at = Date.parse(run.updated_at);
     // A redelivery or a late Backfill must not un-do a newer deploy.
     if (!Number.isFinite(at) || at <= (devDeploy?.at ?? 0)) return false;
-    devDeploy = { actor: names[actor]!, at };
+    devDeploy = { actor: names[actor]!, at, repo, run: run.run_number };
     return true;
+  };
+  const describeDevDeploy = () =>
+    devDeploy
+      ? `in dev = ${devDeploy.actor} (${devDeploy.repo} run ${devDeploy.run}, ${new Date(devDeploy.at).toISOString()})`
+      : "nobody in dev";
+
+  // A repo without the workflow answers 404 — it just has no dev deploys to find — so
+  // ask it hourly, not once a minute. Not forever: a 404 can also be a token blip or a
+  // repo that gains the workflow later.
+  const askAgainAt = new Map<string, number>();
+  /**
+   * Re-read the deploy workflow's latest successful runs for every Tracked Repo and
+   * credit the newest. Backfill and the reconcile poll share this: the header is state
+   * with no Feed entry to dedup against, so a lost workflow_run webhook (or a Backfill
+   * that read something odd during a flaky boot) has nothing else to repair it.
+   * Returns true when the state moved.
+   */
+  const refreshDevDeploys = async (caller: string) => {
+    let moved = false;
+    if (!devDeployWorkflow) return moved;
+    for (const repo of trackedRepos) {
+      if (now() < (askAgainAt.get(repo) ?? 0)) continue;
+      try {
+        const runs = await get(
+          `${repo}/actions/workflows/${devDeployWorkflow}/runs?status=success&per_page=20`,
+        );
+        for (const run of runs.workflow_runs ?? []) if (recordDevDeploy(repo, run)) moved = true;
+      } catch (error) {
+        if ((error as { status?: number }).status === 404) askAgainAt.set(repo, now() + HOUR_MS);
+        console.warn(`${caller} found no dev deploys in ${repo}: ${error}`);
+      }
+    }
+    return moved;
   };
 
   const app = express();
@@ -302,7 +336,7 @@ export async function startServer(port: number, options: Options = {}) {
   //   on connect: {"type":"snapshot","feed":[{<domain event>, "at":<ms>}, ...],
   //                "openPrs":[{repo, number, title, actor}, ...],
   //                "mvp":{"names":[<string>, ...],"count":<number>}|null,
-  //                "devDeploy":{"actor":<string>,"at":<ms>}|null}
+  //                "devDeploy":{"actor":<string>,"at":<ms>,"repo":<string>,"run":<number>}|null}
   //               feed is oldest first and holds the last 24h, each entry stamped with
   //               the server time it happened; openPrs is the current set of open PRs
   //               (state, so no 24h expiry) — what's in flight now, each with the
@@ -343,7 +377,9 @@ export async function startServer(port: number, options: Options = {}) {
       },
     });
     if (!response.ok)
-      throw new Error(`GitHub API ${response.status} for ${path}`);
+      throw Object.assign(new Error(`GitHub API ${response.status} for ${path}`), {
+        status: response.status,
+      });
     return (await response.json()) as any;
   };
 
@@ -444,17 +480,12 @@ export async function startServer(port: number, options: Options = {}) {
       );
 
     // The last dev deploy is state, not a Feed entry, so a restart has to refetch it
-    // or the header sits blank until the next deploy. A repo without the workflow
-    // answers 404 — it just has no dev deploys to find.
-    if (devDeployWorkflow)
-      for (const repo of trackedRepos)
-        await get(
-          `${repo}/actions/workflows/${devDeployWorkflow}/runs?status=success&per_page=20`,
-        )
-          .then((runs) => {
-            for (const run of runs.workflow_runs ?? []) recordDevDeploy(repo, run);
-          })
-          .catch((error) => console.warn(`Backfill found no dev deploys in ${repo}: ${error}`));
+    // or the header sits blank until the next deploy. Say what was chosen: a stale
+    // header is otherwise undiagnosable from the journal.
+    if (devDeployWorkflow) {
+      await refreshDevDeploys("Backfill");
+      console.log(`Backfill: ${describeDevDeploy()}`);
+    }
 
     // Oldest first, matching the Feed's order (its 24h expiry shifts off the front).
     for (const { at, event } of entries.sort((a, b) => a.at - b.at))
@@ -540,10 +571,14 @@ export async function startServer(port: number, options: Options = {}) {
           }
         }
       }
-      if (recovered) {
+      // The header is state, not an event, so a lost workflow_run delivery leaves no
+      // PR to notice; the runs list is the only place it can be repaired from.
+      // Not counted as a recovered event: In Dev is board state, not an event.
+      const devMoved = await refreshDevDeploys("Reconcile");
+      if (devMoved) console.log(`reconcile: ${describeDevDeploy()}`);
+      if (recovered)
         console.log(`reconcile: recovered ${recovered} missed event${recovered === 1 ? "" : "s"}`);
-        broadcast(snapshot());
-      }
+      if (recovered || devMoved) broadcast(snapshot());
     } finally {
       reconciling = false;
     }
@@ -577,7 +612,7 @@ export async function startServer(port: number, options: Options = {}) {
     if (githubEvent === "workflow_run") {
       const recorded = recordDevDeploy(payload.repository?.full_name, payload.workflow_run);
       console.log(
-        `webhook ${delivery}: ${recorded ? `dev deploy by ${devDeploy?.actor}` : "ignored workflow_run"}`,
+        `webhook ${delivery}: ${recorded ? describeDevDeploy() : "ignored workflow_run"}`,
       );
       if (recorded) broadcast(snapshot());
       res.sendStatus(204);

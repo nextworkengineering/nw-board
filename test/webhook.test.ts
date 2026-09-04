@@ -563,7 +563,7 @@ test("a successful dev deploy names its triggering teammate on the next snapshot
 
   expect(status).toBe(204);
   // The display name from the names map, not the login.
-  expect(snapshot.devDeploy).toEqual({ actor: "Rita", at: Date.parse("2026-08-13T09:41:00Z") });
+  expect(snapshot.devDeploy).toEqual({ actor: "Rita", at: Date.parse("2026-08-13T09:41:00Z"), repo: "example-org/projects-app", run: 42 });
   // A deploy is not a Feed event.
   expect(snapshot.feed).toEqual([]);
 });

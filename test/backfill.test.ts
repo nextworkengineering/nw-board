@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, expect, test } from "vitest";
 import { startServer } from "../src/server.ts";
 import {
+  badConfigPath,
   configPath,
   connectedDisplay,
   postWebhook,
@@ -588,5 +589,65 @@ test("an approval whose webhook failed is recovered while the server stays up", 
     (await connectAndReadSnapshot(running.port)).feed.filter(
       (event: any) => event.type === "review-approved" && event.number === 88,
     ),
+  ).toHaveLength(1);
+});
+
+// In Dev: the header names whoever last ran the deploy workflow. It is state with no
+// Feed entry, so Backfill reads the runs list on boot and the reconcile poll re-reads it.
+const devRun = (login: string, when: string, run_number: number) => ({
+  run_number,
+  path: ".github/workflows/env-dev.yaml",
+  conclusion: "success",
+  updated_at: when,
+  triggering_actor: { login },
+});
+/** projects-app answers the runs list from `runs`; the other repos have no such workflow. */
+const devDeployApi = (runs: unknown[]) =>
+  stubGitHubApi((url) => {
+    if (!url.includes("/actions/workflows/env-dev.yaml/runs")) return [];
+    return url.includes("/example-org/projects-app/") ? { workflow_runs: runs } : 404;
+  });
+const rosterConfig = badConfigPath("config-with-names.json");
+
+test("Backfill names the newest roster teammate to deploy to dev", async () => {
+  const api = await devDeployApi([
+    devRun("reviewer-rita", ago(HOUR), 2),
+    devRun("hubot", ago(2 * HOUR), 1),
+  ]);
+  running = await startServer(0, { configPath: rosterConfig, now: () => NOW, githubApiBase: api.base });
+
+  expect((await connectAndReadSnapshot(running.port)).devDeploy).toEqual({
+    actor: "Rita",
+    at: NOW - HOUR,
+    repo: "example-org/projects-app",
+    run: 2,
+  });
+});
+
+test("a dev deploy whose webhook failed is recovered while the server stays up", async () => {
+  const runs = [devRun("reviewer-rita", ago(2 * HOUR), 1)];
+  const api = await devDeployApi(runs);
+  running = await startServer(0, {
+    configPath: rosterConfig,
+    now: () => NOW,
+    githubApiBase: api.base,
+    reconcileMs: 10,
+  });
+  expect((await connectAndReadSnapshot(running.port)).devDeploy?.actor).toBe("Rita");
+
+  // GitHub attempted the workflow_run webhook while Funnel returned 502; only the
+  // runs list knows about this newer deploy.
+  runs.unshift(devRun("hubot", ago(HOUR), 2));
+  await sleep(100);
+
+  expect((await connectAndReadSnapshot(running.port)).devDeploy).toEqual({
+    actor: "Botty",
+    at: NOW - HOUR,
+    repo: "example-org/projects-app",
+    run: 2,
+  });
+  // A repo without the workflow is asked once, not on every poll.
+  expect(
+    api.requests.filter((r) => r.url.includes("/example-org/features/actions/workflows/")),
   ).toHaveLength(1);
 });
