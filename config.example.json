@@ -16,5 +16,6 @@
     "octocat": "Mona",
     "some-github-login": "Firstname"
   },
-  "devDeployWorkflow": "env-dev.yaml"
+  "devDeployWorkflow": "env-dev.yaml",
+  "newsFeedUrl": "https://techcrunch.com/category/artificial-intelligence/feed/"
 }
