@@ -92,6 +92,8 @@ type Options = {
   tickMs?: number;
   /** How often to reconcile merges whose webhook could not reach the board. */
   reconcileMs?: number;
+  /** How long the news-feed proxy waits for its configured upstream. */
+  newsTimeoutMs?: number;
 };
 
 /** Monday 00:00 local time of the week containing `at` — the dedup window. */
@@ -104,6 +106,26 @@ function startOfWeek(at: number) {
 
 /** Local midnight of the day containing `at` — today's MVP starts here. */
 const startOfDay = (at: number) => new Date(at).setHours(0, 0, 0, 0);
+
+const NEWS_MAX_BYTES = 1024 * 1024;
+
+async function limitedText(response: Response) {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) return text + decoder.decode();
+    bytes += value.byteLength;
+    if (bytes > NEWS_MAX_BYTES) {
+      await reader.cancel();
+      throw new Error("news feed exceeds 1 MiB");
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+}
 
 export async function startServer(port: number, options: Options = {}) {
   const secret = process.env.GITHUB_WEBHOOK_SECRET;
@@ -131,6 +153,21 @@ export async function startServer(port: number, options: Options = {}) {
     throw new Error(
       `${configPath}: devDeployWorkflow must be a workflow file name, e.g. "env-dev.yaml"`,
     );
+
+  // Optional because existing Pi installs keep config.json across deploys. A missing
+  // URL leaves the news route disabled until the operator adds one and restarts.
+  let newsFeedUrl: URL | undefined;
+  if (config.newsFeedUrl !== undefined) {
+    const complaint = `${configPath}: newsFeedUrl must be an http(s) URL`;
+    if (typeof config.newsFeedUrl !== "string") throw new Error(complaint);
+    try {
+      newsFeedUrl = new URL(config.newsFeedUrl);
+    } catch {
+      throw new Error(complaint);
+    }
+    if (newsFeedUrl.protocol !== "http:" && newsFeedUrl.protocol !== "https:")
+      throw new Error(complaint);
+  }
 
   // Quiet Hours: sound is allowed on weekdays between these two local times only.
   const quietHours = `${configPath}: quietHours must be {"soundStart":"HH:MM","soundEnd":"HH:MM"}`;
@@ -325,6 +362,32 @@ export async function startServer(port: number, options: Options = {}) {
     } catch {
       // No folder yet — an empty list is the answer, not an error.
       res.json([]);
+    }
+  });
+
+  // Same-origin proxy for the kiosk. The URL comes only from config, so this cannot
+  // be turned into an arbitrary fetch endpoint by a browser request.
+  app.get("/news.xml", async (_req, res) => {
+    if (!newsFeedUrl) {
+      res.sendStatus(404);
+      return;
+    }
+    try {
+      const response = await fetch(newsFeedUrl, {
+        headers: {
+          accept: "application/rss+xml, application/atom+xml, application/xml, text/xml",
+        },
+        signal: AbortSignal.timeout(options.newsTimeoutMs ?? 5_000),
+      });
+      if (!response.ok) {
+        console.warn(`News feed returned ${response.status}: ${newsFeedUrl}`);
+        res.sendStatus(502);
+        return;
+      }
+      res.type("application/xml").send(await limitedText(response));
+    } catch (error) {
+      console.warn(`News feed unavailable: ${error}`);
+      res.sendStatus(502);
     }
   });
 

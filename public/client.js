@@ -585,7 +585,7 @@ const feedRows = Array.from({ length: FEED_ROWS }, (_, i) => {
 // --------------------------------------------------------------------------------
 
 // --------------------------------------------------------------------------------
-// Now Playing ticker: every open PR loops forever across a strip at the bottom.
+// AI News ticker: RSS headlines loop forever across a strip at the bottom.
 // --------------------------------------------------------------------------------
 
 const TICKER_Y = 968;
@@ -608,8 +608,8 @@ tickerStrip.addChild(tickerMask, tickerContent);
 tickerContent.mask = tickerMask;
 layers.board.addChild(tickerStrip);
 
-/** One pass of the loop: a NOW PLAYING marker, then every open PR as a segment. */
-function tickerSequence(openPrs) {
+/** One pass of the loop: an AI NEWS marker, then every headline as a segment. */
+function tickerSequence(headlines) {
   const seq = new Container();
   let x = 0;
   const put = (child) => {
@@ -617,27 +617,21 @@ function tickerSequence(openPrs) {
     seq.addChild(child);
     x += child.width + TICKER_GAP;
   };
-  const marker = label("★ NOW PLAYING ★", 32, C.green);
+  const marker = label("★ AI NEWS ★", 32, C.green);
   marker.position.y = TICKER_Y + 32;
   put(marker);
-  if (!openPrs.length) {
-    const none = label("NO PRS IN FLIGHT — INSERT PULL REQUEST", 32, C.dim);
+  if (!headlines.length) {
+    const none = label("AI NEWS UNAVAILABLE — RETRYING", 32, C.dim);
     none.position.y = TICKER_Y + 32;
     put(none);
   }
-  for (const pr of openPrs) {
+  for (const headline of headlines) {
     const item = new Container();
-    const pillText = label(pr.repo.split("/").pop(), 24, C.green);
-    pillText.position.set(14, TICKER_Y + 36);
-    const pill = new Graphics()
-      .roundRect(0, TICKER_Y + 26, Math.ceil(pillText.width) + 28, 44, 8)
-      .fill({ color: C.white, alpha: 0.05 })
-      .stroke({ color: C.green, alpha: 0.6, width: 2 });
-    const head = label(`#${pr.number} ${pr.actor ?? ""}`.trimEnd(), 32, C.amber);
-    head.position.set(Math.ceil(pillText.width) + 46, TICKER_Y + 32);
-    const text = label(clip(pr.title, 60), 32, C.ink);
-    text.position.set(head.position.x + head.width + 28, TICKER_Y + 32);
-    item.addChild(pill, pillText, head, text);
+    const bullet = label("◆", 32, C.amber);
+    bullet.position.y = TICKER_Y + 32;
+    const text = label(clip(headline, 100), 32, C.ink);
+    text.position.set(bullet.width + 24, TICKER_Y + 32);
+    item.addChild(bullet, text);
     put(item);
   }
   return { seq, width: x };
@@ -716,26 +710,67 @@ setInterval(renderFeed, 60_000);
 
 let tickerLoop = 1;
 let tickerKey = "";
-function renderFlight(openPrs) {
-  // Snapshots arrive after every recorded event; re-rasterising the whole strip
-  // each time is a visible hitch on the Pi. Only rebuild when the content changed.
-  const key = JSON.stringify(openPrs);
+function renderHeadlines(values) {
+  const headlines = values
+    .filter((headline) => typeof headline === "string" && headline.trim())
+    .map((headline) => headline.trim())
+    .slice(0, 10);
+  // Re-rasterising the whole strip is a visible hitch on the Pi. Only rebuild when
+  // the content changed.
+  const key = JSON.stringify(headlines);
   if (key === tickerKey) return;
   tickerKey = key;
   for (const old of tickerContent.removeChildren()) old.destroy({ children: true });
-  const first = tickerSequence(openPrs);
+  const first = tickerSequence(headlines);
   tickerLoop = first.width;
   // Enough copies that the strip never shows a gap: the screen plus one full loop.
-  // ponytail: rebuilt wholesale on every snapshot — cheap at snapshot frequency.
+  // ponytail: rebuilt wholesale every 15 minutes — cheap at news-feed frequency.
   const copies = Math.max(2, Math.ceil(W / tickerLoop) + 1);
   first.seq.position.x = 0;
   tickerContent.addChild(first.seq);
   for (let i = 1; i < copies; i++) {
-    const { seq } = tickerSequence(openPrs);
+    const { seq } = tickerSequence(headlines);
     seq.position.x = i * tickerLoop;
     tickerContent.addChild(seq);
   }
   if (tickerX <= -tickerLoop) tickerX = 0;
+}
+
+let headlines = [];
+const NEWS_REFRESH_MS = 15 * 60 * 1000;
+
+function parseHeadlines(xml) {
+  const document = new DOMParser().parseFromString(xml, "application/xml");
+  if (document.getElementsByTagName("parsererror").length)
+    throw new Error("invalid news feed XML");
+  const rssItems = [...document.getElementsByTagNameNS("*", "item")];
+  const entries = rssItems.length
+    ? rssItems
+    : [...document.getElementsByTagNameNS("*", "entry")];
+  return entries
+    .map((entry) =>
+      [...entry.children]
+        .find((child) => child.localName === "title")
+        ?.textContent?.trim(),
+    )
+    .filter(Boolean)
+    .slice(0, 10);
+}
+
+async function loadHeadlines() {
+  try {
+    const response = await fetch("/news.xml", { cache: "no-store" });
+    if (!response.ok) throw new Error(`news feed returned ${response.status}`);
+    const next = parseHeadlines(await response.text());
+    if (!next.length) throw new Error("news feed has no headlines");
+    headlines = next;
+    renderHeadlines(headlines);
+  } catch (error) {
+    console.warn(error);
+    // Keep the last successful feed. On a cold start the empty render already says
+    // the feed is unavailable and that another attempt is coming.
+    if (!headlines.length) renderHeadlines([]);
+  }
 }
 
 // The float accumulator scrolls; the container lands on whole pixels — fractional
@@ -1322,7 +1357,6 @@ function handleMessage(data) {
     currentMvp = data.mvp;
     setMvp(currentMvp);
     setDevDeploy(data.devDeploy);
-    renderFlight(data.openPrs);
   } else {
     feed.push(stamp(data));
     if (CELEBRATIONS.has(data.type)) celebrate(data.type, data, Boolean(data.audible));
@@ -1351,7 +1385,9 @@ function connect() {
 connect();
 
 renderFeed();
-renderFlight([]);
+renderHeadlines([]);
+void loadHeadlines();
+setInterval(() => void loadHeadlines(), NEWS_REFRESH_MS);
 
 // Visual QA hook: the canvas can only be checked by a human, so every animation and
 // every sound can be fired from the browser console.
@@ -1361,6 +1397,7 @@ renderFlight([]);
 //   arcade.play("pr-merged")           — sound only
 //   arcade.setMvp({names:["Maximus"],count:12}) / arcade.setMvp(null) — marquee MVP
 //   arcade.setDevDeploy({actor:"Maximus"}) / arcade.setDevDeploy(null) — feed header
+//   arcade.setHeadlines(["A very important AI headline"]) — bottom news ticker
 const sample = (type) => ({
   type,
   repo: "example-org/demo",
@@ -1382,6 +1419,7 @@ window.arcade = {
   play,
   setMvp,
   setDevDeploy,
+  setHeadlines: renderHeadlines,
   event: handleMessage,
   demo() {
     // Every animation and sound in order, then back to the real board state:

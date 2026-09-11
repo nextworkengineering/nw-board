@@ -81,8 +81,9 @@ Check by the hook's `config.url`, then confirm the delivery id in the logs.
 
 `config.json` holds Tracked Repos, Quiet Hours, Day Chime times, and the login →
 first-name map. `devDeployWorkflow` is the file name of the deploy-to-dev
-workflow whose last successful run names who's in dev. The server won't start
-without the file.
+workflow whose last successful run names who's in dev. `newsFeedUrl` is the RSS
+or Atom feed shown in the bottom ticker; the example uses TechCrunch's AI feed.
+Feeds larger than 1 MiB are rejected. The server won't start without the file.
 
 It is **gitignored** — it names your repos and your team, so it stays out of a
 public repo. Copy the template and fill it in:
@@ -93,7 +94,9 @@ cp config.example.json config.json
 
 Because it's untracked, edit it in place on whatever machine runs the board;
 `deploy.sh` pulls straight past it. `setup-wizard.sh` creates it from the
-template on a fresh clone and reads the Tracked Repo list back out of it.
+template on a fresh clone and reads the Tracked Repo list back out of it. Existing
+installs must add `newsFeedUrl` to their `config.json` and restart the service to
+enable the news ticker.
 
 Event sounds: the board plays `public/sounds/another-one.mp3` (the DJ Khaled clip)
 on a merge, `public/sounds/bomboclaat.mp3` on an approval, and

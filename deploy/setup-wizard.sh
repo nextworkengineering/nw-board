@@ -413,6 +413,7 @@ if [[ ! -f "$REPO_DIR/config.json" ]]; then
   note "  trackedRepos      the repos whose activity feeds the board"
   note "  names             GitHub login -> first name, and the roster for clips"
   note "  devDeployWorkflow the deploy-to-dev workflow's file name"
+  note "  newsFeedUrl       the RSS or Atom source for the bottom ticker"
   pause "Enter once you have edited $REPO_DIR/config.json"
 fi
 verify "config.json present (the Tracked Repo list)" test -f "$REPO_DIR/config.json"
