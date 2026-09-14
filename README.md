@@ -98,13 +98,15 @@ template on a fresh clone and reads the Tracked Repo list back out of it. Existi
 installs must add `newsFeedUrl` to their `config.json` and restart the service to
 enable the news ticker.
 
-Event sounds: the board plays `public/sounds/another-one.mp3` (the DJ Khaled clip)
-on a merge, `public/sounds/bomboclaat.mp3` on an approval, and
-`public/sounds/oh-my-gosh.mp3` and `public/sounds/super-mario-end.mp3` on the
-start- and end-of-day chimes. None of them are in
-git — drop them there yourself; without one the board falls back to that event's
-8-bit jingle. Clips only play for people on the `names` map — a bot or an unmapped
-login gets the jingle, so adding a teammate to the map is what opts them in.
+Event sounds: the board plays `public/sounds/jetson.mp3` on a merge and
+`public/sounds/omg.mp3` on an approval — both are in git, so a deploy delivers
+them. The chimes are not: `public/sounds/oh-my-gosh.mp3` (start of day) and
+`public/sounds/super-mario-end.mp3` (end of day) have to be dropped in by hand on
+each machine. Without a file the board falls back to that event's 8-bit jingle.
+`omg.mp3` carries 250ms of silence on the front so a slow audio sink can't clip
+its opening — do the same to any clip you swap in. Clips only play for people on
+the `names` map — a bot or an unmapped login gets the jingle, so adding a
+teammate to the map is what opts them in.
 
 Celebration clips: drop `.gif`/`.webp` files into `public/celebrations/` and a
 merge takeover shows one at random in the trophy slot (the WWE-gif move). The
