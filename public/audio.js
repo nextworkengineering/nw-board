@@ -24,6 +24,13 @@ const JINGLE_NOTES = {
     );
     noise(0, 0.12, 0.04);
   },
+  // The one Ambient Event with a voice: a rocket-launch blip matching its feed
+  // animation, mixed under the takeover jingles so opening a PR doesn't shout.
+  "pr-opened": (tone, noise) => {
+    tone(392, 0, 0.3, { type: "triangle", gain: 0.07, slideTo: 880 });
+    tone(880, 0.26, 0.16, { type: "triangle", gain: 0.05 });
+    noise(0, 0.22, 0.03);
+  },
   "day-chime": dayChime,
   // Start of day has its own clip; without the file it falls back to the same bell.
   "day-start": dayChime,
@@ -32,6 +39,7 @@ const JINGLE_NOTES = {
 const SAMPLES = {
   "pr-merged": "sounds/jetson.mp3",
   "review-approved": "sounds/omg.mp3",
+  "pr-opened": "sounds/metrooo.mp3",
   "day-start": "sounds/oh-my-gosh.mp3",
   "day-chime": "sounds/super-mario-end.mp3",
 };

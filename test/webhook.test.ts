@@ -137,6 +137,7 @@ const withPullRequest = (patch: Record<string, unknown>) =>
 
 test.for([
   [
+    // Ambient, but the one that makes a noise, so it carries the sound flags too.
     "a pr-opened Ambient Event",
     { body: withPullRequest({ action: "opened" }) },
     {
@@ -145,6 +146,8 @@ test.for([
       number: 42,
       title: "Add arcade scene renderer",
       actor: "octocat",
+      audible: true,
+      teammate: false,
     },
   ],
   [

@@ -1343,7 +1343,9 @@ app.ticker.add((ticker) => {
 //   on connect and after every recorded event, then bare domain
 //   events {type, repo, number, title, actor}; actor is the GitHub login of whoever
 //   did it (merger, reviewer, commenter), always a string and "" when GitHub named
-//   nobody. Celebration Events carry audible:true|false (Quiet Hours), and
+// nobody. Events that make a sound — the Celebrations plus pr-opened — carry
+// audible:true|false (Quiet Hours) and teammate:true|false (clip or jingle);
+// every other Ambient Event carries neither and stays silent. And
 //   {type:"day-chime", at:"HH:MM"} marks the start and end of the workday.
 // --------------------------------------------------------------------------------
 
@@ -1360,7 +1362,16 @@ function handleMessage(data) {
   } else {
     feed.push(stamp(data));
     if (CELEBRATIONS.has(data.type)) celebrate(data.type, data, Boolean(data.audible));
-    else ambient(data.type);
+    else {
+      ambient(data.type);
+      // pr-opened is the one Ambient Event with a sound: it stays in the feed rather
+      // than taking the board over, but the server flags it like a Celebration. Every
+      // other ambient arrives with no `audible` at all, which is what keeps it silent.
+      // ponytail: no queue, unlike the takeovers — a batch of PRs opened at once
+      // (dependabot, a stacked-PR push) overlaps that many clips. Add a cooldown
+      // here if it ever actually happens.
+      if (data.audible) play(data.type, data.teammate !== false);
+    }
   }
   renderFeed();
 }
@@ -1395,6 +1406,8 @@ setInterval(() => void loadHeadlines(), NEWS_REFRESH_MS);
 //   arcade.event({type:"pr-merged", repo:"a/b", number:7, title:"x", audible:true})
 //   arcade.celebrate("review-approved") / arcade.ambient("pr-comment") / arcade.chime("09:00")
 //   arcade.play("pr-merged")           — sound only
+//   arcade.ambient() animates silently; pr-opened's sound rides the audible flag, so
+//   hear it with arcade.play("pr-opened") or arcade.event({...,"audible":true})
 //   arcade.setMvp({names:["Maximus"],count:12}) / arcade.setMvp(null) — marquee MVP
 //   arcade.setDevDeploy({actor:"Maximus"}) / arcade.setDevDeploy(null) — feed header
 //   arcade.setHeadlines(["A very important AI headline"]) — bottom news ticker
@@ -1425,8 +1438,14 @@ window.arcade = {
     // Every animation and sound in order, then back to the real board state:
     // 4 ambients -> fake MVP + both takeovers (queued) -> both Day Chimes ->
     // restore the MVP the server last sent.
+    // pr-opened is the one Ambient Event with a sound, so the tour has to fire both
+    // halves by hand. Not via handleMessage: that would push a fake PR into the live
+    // feed, which the tour has no way to take back.
     ["pr-opened", "pr-comment", "changes-requested", "pr-closed"].forEach((type, i) =>
-      setTimeout(() => ambient(type), i * 1600),
+      setTimeout(() => {
+        ambient(type);
+        if (type === "pr-opened") play(type);
+      }, i * 1600),
     );
     // The fake MVP goes into currentMvp too, so the 17:00 chime's congrats line
     // has a name to honour; restored afterwards unless a real snapshot already did.

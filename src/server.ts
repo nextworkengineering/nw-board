@@ -75,6 +75,13 @@ function toDomainEvent(
 /** Celebration Events are the loud ones; everything else is an Ambient Event. */
 const CELEBRATIONS = new Set(["pr-merged", "review-approved"]);
 
+/**
+ * Events that carry sound. Celebrations plus pr-opened, the one Ambient Event with
+ * a voice: it keeps its quiet feed animation and takes over nothing, but it does
+ * make a noise, so it needs the same Quiet Hours and roster flags on the wire.
+ */
+const SOUNDED = new Set([...CELEBRATIONS, "pr-opened"]);
+
 /** "09:00" -> 540 minutes past local midnight. Anything else is a config error. */
 function minutesOfDay(value: unknown, complaint: string) {
   const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(value));
@@ -410,11 +417,12 @@ export async function startServer(port: number, options: Options = {}) {
   //               actor is the GitHub login of whoever did it (the merger for a
   //               pr-merged, the reviewer for a review, the commenter for a comment),
   //               always a string — "" when GitHub named nobody.
-  //               Celebration Events carry "audible": true|false — Quiet Hours decided
-  //               at delivery time — and "teammate": true|false, whether the actor's
-  //               login is in the names map (the recorded clips are for teammates; an
-  //               unmapped actor gets the 8-bit jingle). Ambient Events never make
-  //               sound, so carry neither flag.
+  //               Events that make a sound — the Celebrations plus pr-opened — carry
+  //               "audible": true|false — Quiet Hours decided at delivery time — and
+  //               "teammate": true|false, whether the actor's login is in the names
+  //               map (the recorded clips are for teammates; an unmapped actor gets
+  //               the 8-bit jingle). Every other Ambient Event is silent and carries
+  //               neither flag, which is how the board knows to stay quiet.
   //   chime:      {"type":"day-chime","at":"09:00"}  (weekdays, on the configured times)
   // No domain event type is called "snapshot" or "day-chime", so `type` tells them apart.
   const broadcast = (message: unknown) => {
@@ -697,7 +705,7 @@ export async function startServer(port: number, options: Options = {}) {
       const audible = soundAllowed();
       // A Celebration that reaches the board silently looks exactly like one that
       // never arrived, so name which gate decided the sound.
-      const sound = !CELEBRATIONS.has(event.type)
+      const sound = !SOUNDED.has(event.type)
         ? ""
         : ` sound=${!audible ? "silent (quiet hours)" : teammate ? "clip" : "jingle (actor not on the roster)"}`;
       const recorded = recordEvent(event);
@@ -708,7 +716,7 @@ export async function startServer(port: number, options: Options = {}) {
       // first): no state change, so nothing to tell the displays.
       if (recorded) {
         broadcast(
-          CELEBRATIONS.has(event.type)
+          SOUNDED.has(event.type)
             ? { ...event, audible, teammate }
             : event,
         );
