@@ -116,8 +116,11 @@ animate silently until a 1.5s cooldown expires. Takeovers queue instead, because
 each owns the board for 5s — an ambient sound has no visual to wait for, and
 twenty queued clips would still be playing long after the feed moved on.
 
-Every clip carries at least 250ms of leading silence so a slow audio sink can't
-clip its opening — `CLAUDE.md` has the one-off recipe for padding a new one.
+Every clip is normalized to the same loudness and carries at least 250ms of
+leading silence so a slow audio sink can't clip its opening. Run a new one
+through `scripts/normalize-sound.py` rather than dropping the download in
+straight — as bought, the three clips spanned 16 dB, enough that the quietest
+was inaudible after the loudest.
 
 Celebration clips: drop `.gif`/`.webp` files into `public/celebrations/` and a
 merge takeover shows one at random in the trophy slot (the WWE-gif move). The
