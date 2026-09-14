@@ -98,15 +98,21 @@ template on a fresh clone and reads the Tracked Repo list back out of it. Existi
 installs must add `newsFeedUrl` to their `config.json` and restart the service to
 enable the news ticker.
 
-Event sounds: the board plays `public/sounds/jetson.mp3` on a merge and
-`public/sounds/omg.mp3` on an approval — both are in git, so a deploy delivers
-them. The chimes are not: `public/sounds/oh-my-gosh.mp3` (start of day) and
+Event sounds: the board plays `public/sounds/jetson.mp3` on a merge,
+`public/sounds/omg.mp3` on an approval, and `public/sounds/metrooo.mp3` when a PR
+is opened — all three are in git, so a deploy delivers them. The chimes are not:
+`public/sounds/oh-my-gosh.mp3` (start of day) and
 `public/sounds/super-mario-end.mp3` (end of day) have to be dropped in by hand on
 each machine. Without a file the board falls back to that event's 8-bit jingle.
-`omg.mp3` carries 250ms of silence on the front so a slow audio sink can't clip
-its opening — do the same to any clip you swap in. Clips only play for people on
-the `names` map — a bot or an unmapped login gets the jingle, so adding a
-teammate to the map is what opts them in.
+Clips only play for people on the `names` map — a bot or an unmapped login gets
+the jingle, so adding a teammate to the map is what opts them in.
+
+Opening a PR is the one Ambient Event with a sound. It keeps its quiet rocket
+animation in the feed and never takes the board over, but Quiet Hours and
+the roster gate it exactly like a Celebration Event. See `CONTEXT.md`.
+
+Every clip carries at least 250ms of leading silence so a slow audio sink can't
+clip its opening — `CLAUDE.md` has the one-off recipe for padding a new one.
 
 Celebration clips: drop `.gif`/`.webp` files into `public/celebrations/` and a
 merge takeover shows one at random in the trophy slot (the WWE-gif move). The

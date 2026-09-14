@@ -90,7 +90,9 @@ test("a playable recorded clip does not create a synthesis context", async () =>
 test.for([
   ["day-start", "sounds/oh-my-gosh.mp3"],
   ["day-chime", "sounds/super-mario-end.mp3"],
-])("the %s clip falls back to the bell when the file is missing", async ([name, file]) => {
+  // Ambient but audible: it needs a jingle of its own, or a missing file is silence.
+  ["pr-opened", "sounds/metrooo.mp3"],
+])("the %s clip falls back to a jingle when the file is missing", async ([name, file]) => {
   const { AudioContext, starts } = audioContext("suspended");
   const Audio = vi.fn(function Audio() {
     return { volume: 1, play: vi.fn().mockRejectedValue(new Error("404")) };

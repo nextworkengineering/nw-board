@@ -16,6 +16,11 @@ const openedBody = JSON.stringify({
   action: "opened",
   pull_request: { ...merged.pull_request, merged: false },
 });
+const closedBody = JSON.stringify({
+  ...merged,
+  action: "closed",
+  pull_request: { ...merged.pull_request, merged: false },
+});
 
 /**
  * Quiet Hours and Day Chimes are local-time rules, so the clock the tests drive is
@@ -81,11 +86,35 @@ test.for([
   expect(received).toMatchObject([{ type: "review-approved", actor, teammate }]);
 });
 
-test("an Ambient Event carries no audible flag even inside the sound window", async () => {
+test("a silent Ambient Event carries no audible flag even inside the sound window", async () => {
   running = await startServer(0, {
     configPath,
     now: () => at(THURSDAY, 10, 0),
   });
+
+  const { received } = await postAndWatch(running.port, { body: closedBody });
+
+  expect(received).toEqual([
+    {
+      type: "pr-closed",
+      repo: "example-org/projects-app",
+      number: 42,
+      title: "Add arcade scene renderer",
+      actor: "octocat",
+    },
+  ]);
+});
+
+/**
+ * pr-opened is Ambient but audible: it must carry the same flags a Celebration does,
+ * or the board has no way to know whether Quiet Hours silenced it.
+ */
+test.for([
+  ["inside the sound window is flagged audible", at(THURSDAY, 10, 0), true],
+  ["outside the sound window is flagged silent", at(THURSDAY, 22, 30), false],
+  ["on a weekend is flagged silent", at(SATURDAY, 10, 0), false],
+])("an opened PR delivered %s", async ([, clock, audible]) => {
+  running = await startServer(0, { configPath, now: () => clock as number });
 
   const { received } = await postAndWatch(running.port, { body: openedBody });
 
@@ -96,6 +125,8 @@ test("an Ambient Event carries no audible flag even inside the sound window", as
       number: 42,
       title: "Add arcade scene renderer",
       actor: "octocat",
+      audible,
+      teammate: false,
     },
   ]);
 });
