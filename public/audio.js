@@ -45,6 +45,16 @@ const SAMPLES = {
 };
 
 /**
+ * How long an Ambient Event sound silences the next one. Unlike the takeovers, which
+ * serialize behind a 5s scene, an ambient sound has no visual to queue against — so a
+ * batch of PRs opened at once (dependabot, a stacked-PR push) would stack clips on top
+ * of each other. The burst makes the noise once and the rest animate silently: dropping
+ * beats queueing here, because 20 queued clips would still be playing long after the
+ * feed moved on. Roughly the length of the longest ambient clip.
+ */
+const AMBIENT_COOLDOWN_MS = 1500;
+
+/**
  * Build the board's audio player. Dependencies are injectable because the failure
  * that matters happens between Web APIs: Audio.play() rejects, AudioContext starts
  * suspended, and resume() changes its state asynchronously.
@@ -54,8 +64,10 @@ export function createAudioPlayer({
   Audio: AudioImpl = globalThis.Audio,
   random = Math.random,
   warn = console.warn,
+  now = Date.now,
 } = {}) {
   let audio;
+  let lastAmbientAt = -Infinity;
 
   async function ready() {
     try {
@@ -123,9 +135,26 @@ export function createAudioPlayer({
     }
   }
 
-  return { play, resume: ready };
+  /**
+   * The Ambient Event sound path. The server's flags decide whether there is a sound
+   * at all — no `audible` means Quiet Hours, or an event type that is simply silent —
+   * and the cooldown decides whether this one is the sound the burst gets.
+   *
+   * Resolves to whether a sound started, so a caller can tell "throttled" from "played".
+   */
+  async function playAmbient(event) {
+    if (!event?.audible) return false;
+    if (now() - lastAmbientAt < AMBIENT_COOLDOWN_MS) return false;
+    // Stamped before the await, not after: two events arriving in the same tick would
+    // both pass an end-of-play check and stack anyway, which is the bug being fixed.
+    lastAmbientAt = now();
+    return play(event.type, event.teammate !== false);
+  }
+
+  return { play, playAmbient, resume: ready };
 }
 
 const player = createAudioPlayer();
 export const play = player.play;
+export const playAmbient = player.playAmbient;
 export const resumeAudio = player.resume;

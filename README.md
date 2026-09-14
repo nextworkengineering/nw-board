@@ -111,6 +111,11 @@ Opening a PR is the one Ambient Event with a sound. It keeps its quiet rocket
 animation in the feed and never takes the board over, but Quiet Hours and
 the roster gate it exactly like a Celebration Event. See `CONTEXT.md`.
 
+A batch of PRs opened at once makes the noise once: the first plays and the rest
+animate silently until a 1.5s cooldown expires. Takeovers queue instead, because
+each owns the board for 5s — an ambient sound has no visual to wait for, and
+twenty queued clips would still be playing long after the feed moved on.
+
 Every clip carries at least 250ms of leading silence so a slow audio sink can't
 clip its opening — `CLAUDE.md` has the one-off recipe for padding a new one.
 

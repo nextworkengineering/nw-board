@@ -19,7 +19,7 @@ import {
   Text,
   Texture,
 } from "./vendor/pixi.min.mjs";
-import { play, resumeAudio } from "./audio.js";
+import { play, playAmbient, resumeAudio } from "./audio.js";
 import { KERNEL } from "./kernel-tokens.gen.js";
 
 // The scene is authored at 1080p and scaled to fit whatever the TV reports, so the
@@ -1365,12 +1365,9 @@ function handleMessage(data) {
     else {
       ambient(data.type);
       // pr-opened is the one Ambient Event with a sound: it stays in the feed rather
-      // than taking the board over, but the server flags it like a Celebration. Every
-      // other ambient arrives with no `audible` at all, which is what keeps it silent.
-      // ponytail: no queue, unlike the takeovers — a batch of PRs opened at once
-      // (dependabot, a stacked-PR push) overlaps that many clips. Add a cooldown
-      // here if it ever actually happens.
-      if (data.audible) play(data.type, data.teammate !== false);
+      // than taking the board over, but the server flags it like a Celebration. The
+      // flags and the burst cooldown both live in audio.js, where they are testable.
+      playAmbient(data);
     }
   }
   renderFeed();
