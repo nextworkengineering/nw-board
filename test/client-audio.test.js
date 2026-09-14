@@ -68,7 +68,7 @@ test("a missing recorded clip falls back to a jingle on the same event", async (
 
   await expect(player.play("review-approved", true)).resolves.toBe(true);
 
-  expect(Audio).toHaveBeenCalledWith("sounds/bomboclaat.mp3");
+  expect(Audio).toHaveBeenCalledWith("sounds/omg.mp3");
   expect(context.resume).toHaveBeenCalledOnce();
   expect(starts.length).toBeGreaterThan(0);
 });
