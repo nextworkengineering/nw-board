@@ -11,6 +11,12 @@ set -euo pipefail
 # PR_ARCADE_FPS=1 adds the ?fps overlay: frame rate + which GPU/renderer WebGL got.
 URL="http://localhost:3000/${PR_ARCADE_FPS:+?fps}"
 
+# PR_ARCADE_VOLUME calibrates the board against the TV. 100% = unity, no attenuation.
+# pactl percentages are cubic (50% is about -18 dB); use dB (e.g. -6dB) to tune finely.
+# Make it permanent with `systemctl --user edit pr-arcade-kiosk` and an
+# Environment=PR_ARCADE_VOLUME= line, the same drop-in install.sh writes ExecStart into.
+VOLUME="${PR_ARCADE_VOLUME:-100%}"
+
 # Wait for something to draw on: this service can start before the compositor
 # after a cold boot. Detected rather than hardcoded in the unit, because the
 # wayland socket name varies by session (wayfire, labwc, X-only).
@@ -86,8 +92,8 @@ fi
 # can make its internal mailbox/fallback device the default even while the TV's HDMI
 # sink is present, which sends a healthy audio stream somewhere nobody can hear it.
 # The mode change above can also drop and re-register HDMI briefly. Wait specifically
-# for HDMI, select and unmute it, and only then launch Chromium. Best-effort, like the
-# mode force — a Pi without pactl just carries on.
+# for HDMI, select it, unmute it and set its level, and only then launch Chromium.
+# Best-effort, like the mode force — a Pi without pactl just carries on.
 if command -v pactl >/dev/null 2>&1; then
   AUDIO_SINK=""
   for _ in $(seq 1 20); do
@@ -103,7 +109,13 @@ if command -v pactl >/dev/null 2>&1; then
       echo "kiosk: could not select HDMI audio sink $AUDIO_SINK" >&2
     pactl set-sink-mute "$AUDIO_SINK" 0 ||
       echo "kiosk: could not unmute HDMI audio sink $AUDIO_SINK" >&2
-    echo "kiosk: using audio sink $AUDIO_SINK"
+    # Nothing else pins the level. WirePlumber restores whatever the sink was last left
+    # at, so one stray volume-down from a debugging session is still there next week —
+    # and until now nothing recorded what the level even was, which is why the board
+    # drifting loud one day and quiet the next left no evidence behind.
+    pactl set-sink-volume "$AUDIO_SINK" "$VOLUME" ||
+      echo "kiosk: could not set volume on $AUDIO_SINK" >&2
+    echo "kiosk: using audio sink $AUDIO_SINK at $VOLUME"
   fi
 fi
 
