@@ -126,7 +126,7 @@ const WAU_TILES = {
   targetWau: 7119740,
   targetPercent: 7122309,
   activationPercent: 10992630,
-  cumulative: 7119742,
+  daily: 7119735,
 } as const;
 
 function normalizeWauDashboard(payload: any) {
@@ -144,24 +144,24 @@ function normalizeWauDashboard(payload: any) {
     return parsed;
   };
   const scalar = (id: number, name: string) => number(result(id)?.[0]?.[0], name);
-  const cumulative = result(WAU_TILES.cumulative).map((row: unknown, index: number) => {
+  const daily = result(WAU_TILES.daily).map((row: unknown, index: number) => {
     if (!Array.isArray(row) || !/^Day [1-7]$/.test(String(row[0])))
-      throw new Error("PostHog cumulative WAU row is malformed");
+      throw new Error("PostHog daily WAU row is malformed");
     return {
       day: Number(String(row[0]).slice(4)),
-      current: number(row[1], `cumulative day ${index + 1} current`),
-      previous: number(row[2], `cumulative day ${index + 1} previous`),
+      current: number(row[1], `daily day ${index + 1} current`),
+      previous: number(row[2], `daily day ${index + 1} previous`),
     };
   });
-  if (cumulative.length !== 7 || cumulative.some((row, index) => row.day !== index + 1))
-    throw new Error("PostHog cumulative WAU result must contain days 1-7");
+  if (daily.length !== 7 || daily.some((row, index) => row.day !== index + 1))
+    throw new Error("PostHog daily WAU result must contain days 1-7");
   return {
     fetchedAt: new Date().toISOString(),
     currentWau: scalar(WAU_TILES.currentWau, "current WAU"),
     targetWau: scalar(WAU_TILES.targetWau, "target WAU"),
     targetPercent: scalar(WAU_TILES.targetPercent, "target percent"),
     activationPercent: scalar(WAU_TILES.activationPercent, "activation percent"),
-    cumulative,
+    daily,
   };
 }
 

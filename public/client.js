@@ -581,7 +581,7 @@ const feedRows = Array.from({ length: FEED_ROWS }, (_, i) => {
 });
 
 // --------------------------------------------------------------------------------
-// Weekly WAU: four dashboard KPIs and the current-vs-last-week cumulative build.
+// Weekly WAU: four dashboard KPIs and new WAU per day for this week vs last week.
 // --------------------------------------------------------------------------------
 
 const wauPanel = panel(24, 712, 1872, 248, "WEEKLY WAU GROWTH", C.ink);
@@ -618,7 +618,7 @@ const wauValues = {
 const wauChart = new Container();
 wauChart.position.set(930, 68);
 wauPanel.addChild(wauChart);
-const chartTitle = label("CUMULATIVE BUILD", 20, C.dim);
+const chartTitle = label("NEW WAU / DAY", 20, C.dim);
 wauChart.addChild(chartTitle);
 const currentLegend = label("● THIS WEEK", 18, C.green);
 currentLegend.position.set(338, 2);
@@ -666,9 +666,11 @@ function renderWau(data, stale = false) {
   const plot = { x: 8, y: 38, width: 900, height: 116 };
   const max = Math.max(
     1,
-    ...snapshot.cumulative.flatMap((point) => [point.current, point.previous]),
+    ...snapshot.daily.flatMap((point) => [point.current, point.previous]),
   );
-  const x = (index) => plot.x + (plot.width * index) / 6;
+  const groupWidth = plot.width / 7;
+  const barWidth = 38;
+  const x = (index) => plot.x + groupWidth * (index + 0.5);
   const y = (value) => plot.y + plot.height - (value / max) * plot.height;
   chartLines
     .clear()
@@ -678,15 +680,14 @@ function renderWau(data, stale = false) {
     .moveTo(plot.x, plot.y + plot.height / 2)
     .lineTo(plot.x + plot.width, plot.y + plot.height / 2)
     .stroke({ width: 1, color: C.panelEdge, alpha: 0.5 });
-  for (const [key, color] of [["previous", C.info], ["current", C.green]]) {
-    snapshot.cumulative.forEach((point, index) => {
-      if (index === 0) chartLines.moveTo(x(index), y(point[key]));
-      else chartLines.lineTo(x(index), y(point[key]));
+  for (const [key, color, offset] of [
+    ["previous", C.info, -barWidth],
+    ["current", C.green, 0],
+  ]) {
+    snapshot.daily.forEach((point, index) => {
+      const top = y(point[key]);
+      chartLines.rect(x(index) + offset, top, barWidth, plot.y + plot.height - top).fill(color);
     });
-    chartLines.stroke({ width: 4, color });
-    snapshot.cumulative.forEach((point, index) =>
-      chartLines.circle(x(index), y(point[key]), 4).fill(color),
-    );
   }
   dayLabels.forEach((day, index) => day.position.set(x(index), plot.y + plot.height + 5));
 }
@@ -701,8 +702,8 @@ async function loadWau() {
       ![next.currentWau, next.targetWau, next.targetPercent, next.activationPercent].every(
         Number.isFinite,
       ) ||
-      !Array.isArray(next.cumulative) ||
-      next.cumulative.length !== 7
+      !Array.isArray(next.daily) ||
+      next.daily.length !== 7
     )
       throw new Error("invalid WAU dashboard data");
     renderWau(next);
@@ -1554,10 +1555,10 @@ const sampleWau = {
   targetWau: 17518,
   targetPercent: 33.7,
   activationPercent: 4.5,
-  cumulative: [2869, 4548, 5907, 5907, 5907, 5907, 5907].map((current, index) => ({
+  daily: [2869, 1679, 1503, 0, 0, 0, 0].map((current, index) => ({
     day: index + 1,
     current,
-    previous: [2384, 4329, 6432, 8699, 10447, 12329, 14189][index],
+    previous: [2384, 1945, 2103, 2267, 1748, 1882, 1860][index],
   })),
 };
 // ?demo: auto-run the full tour shortly after load — lets a plain URL show the
