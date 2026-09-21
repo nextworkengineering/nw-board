@@ -705,7 +705,10 @@ function renderWau(data, stale = false) {
       value.position.set(x(index) + offset + barWidth / 2, plot.y + plot.height + 4);
     });
   }
-  dayLabels.forEach((day, index) => day.position.set(x(index), plot.y + plot.height + 22));
+  dayLabels.forEach((day, index) => {
+    day.text = (snapshot.daily[index].label ?? `D${index + 1}`).slice(0, 3).toUpperCase();
+    day.position.set(x(index), plot.y + plot.height + 22);
+  });
 }
 
 const WAU_REFRESH_MS = 15 * 60 * 1000;
@@ -1573,6 +1576,7 @@ const sampleWau = {
   activationPercent: 4.5,
   daily: [2869, 1679, 1503, 0, 0, 0, 0].map((current, index) => ({
     day: index + 1,
+    label: ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"][index],
     current,
     previous: [2384, 1945, 2103, 2267, 1748, 1882, 1860][index],
   })),
