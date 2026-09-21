@@ -31,6 +31,9 @@ async function upstream(handler: RequestListener) {
 }
 
 const tile = (id: number, result: unknown[]) => ({ id, insight: { result } });
+// The saved insight labels rows by weekday of the Sat–Fri cycle and carries a
+// daily-target column the board does not use.
+const DAYS = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
 const dashboard = () => ({
   results: [
     tile(7119738, [[5906]]),
@@ -39,7 +42,7 @@ const dashboard = () => ({
     tile(10992630, [["4.5%"]]),
     tile(
       7119735,
-      Array.from({ length: 7 }, (_, day) => [`Day ${day + 1}`, 1000 + day, 900 + day]),
+      DAYS.map((label, day) => [label, 1000 + day, 900 + day, 2503]),
     ),
   ],
 });
@@ -77,8 +80,9 @@ test("the WAU route requests and normalizes the five saved dashboard tiles", asy
     targetWau: 17518,
     targetPercent: 33.7,
     activationPercent: 4.5,
-    daily: Array.from({ length: 7 }, (_, day) => ({
+    daily: DAYS.map((label, day) => ({
       day: day + 1,
+      label,
       current: 1000 + day,
       previous: 900 + day,
     })),
@@ -126,6 +130,14 @@ test("the WAU route rejects an oversized upstream response", async () => {
 
 test.each([
   ["malformed", { results: "nope" }],
+  [
+    "non-numeric daily",
+    {
+      results: dashboard().results.map((item) =>
+        item.id === 7119735 ? tile(7119735, [["Saturday", "n/a", 1, 2503]]) : item,
+      ),
+    },
+  ],
   ["missing a required tile", { results: dashboard().results.slice(1) }],
   [
     "missing a daily result",

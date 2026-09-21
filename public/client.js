@@ -634,6 +634,18 @@ const dayLabels = Array.from({ length: 7 }, (_, index) => {
   wauChart.addChild(day);
   return day;
 });
+const barValues = [0, 1].map(() =>
+  Array.from({ length: 7 }, () => {
+    const value = label("", 14, C.dim);
+    value.anchor.set(0.5, 0);
+    wauChart.addChild(value);
+    return value;
+  }),
+);
+const compact = (n) =>
+  new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 })
+    .format(n)
+    .toLowerCase();
 const wauUnavailable = label("WAU DATA UNAVAILABLE — RETRYING", 24, C.dim);
 wauUnavailable.anchor.set(0.5);
 wauUnavailable.position.set(1378, 154);
@@ -663,7 +675,7 @@ function renderWau(data, stale = false) {
   wauStatus.text = stale ? `STALE // ${updated} // RETRYING` : `UPDATED ${updated}`;
   wauStatus.style.fill = stale ? C.red : C.green;
 
-  const plot = { x: 8, y: 38, width: 900, height: 116 };
+  const plot = { x: 8, y: 38, width: 900, height: 96 };
   const max = Math.max(
     1,
     ...snapshot.daily.flatMap((point) => [point.current, point.previous]),
@@ -680,16 +692,23 @@ function renderWau(data, stale = false) {
     .moveTo(plot.x, plot.y + plot.height / 2)
     .lineTo(plot.x + plot.width, plot.y + plot.height / 2)
     .stroke({ width: 1, color: C.panelEdge, alpha: 0.5 });
-  for (const [key, color, offset] of [
+  for (const [row, [key, color, offset]] of [
     ["previous", C.info, -barWidth],
     ["current", C.green, 0],
-  ]) {
+  ].entries()) {
     snapshot.daily.forEach((point, index) => {
       const top = y(point[key]);
       chartLines.rect(x(index) + offset, top, barWidth, plot.y + plot.height - top).fill(color);
+      const value = barValues[row][index];
+      value.text = compact(point[key]);
+      value.style.fill = color;
+      value.position.set(x(index) + offset + barWidth / 2, plot.y + plot.height + 4);
     });
   }
-  dayLabels.forEach((day, index) => day.position.set(x(index), plot.y + plot.height + 5));
+  dayLabels.forEach((day, index) => {
+    day.text = (snapshot.daily[index].label ?? `D${index + 1}`).slice(0, 3).toUpperCase();
+    day.position.set(x(index), plot.y + plot.height + 22);
+  });
 }
 
 const WAU_REFRESH_MS = 15 * 60 * 1000;
@@ -1557,6 +1576,7 @@ const sampleWau = {
   activationPercent: 4.5,
   daily: [2869, 1679, 1503, 0, 0, 0, 0].map((current, index) => ({
     day: index + 1,
+    label: ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"][index],
     current,
     previous: [2384, 1945, 2103, 2267, 1748, 1882, 1860][index],
   })),

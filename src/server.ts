@@ -144,17 +144,19 @@ function normalizeWauDashboard(payload: any) {
     return parsed;
   };
   const scalar = (id: number, name: string) => number(result(id)?.[0]?.[0], name);
+  // Rows arrive ordered Day 1..7 of the Sat–Fri cycle; the first column is a free
+  // label (the insight has carried "Day 1" and "Saturday" so far) and extra
+  // columns are ignored, so an edit to the saved query cannot 502 the board.
   const daily = result(WAU_TILES.daily).map((row: unknown, index: number) => {
-    if (!Array.isArray(row) || !/^Day [1-7]$/.test(String(row[0])))
-      throw new Error("PostHog daily WAU row is malformed");
+    if (!Array.isArray(row)) throw new Error("PostHog daily WAU row is malformed");
     return {
-      day: Number(String(row[0]).slice(4)),
+      day: index + 1,
+      label: String(row[0]),
       current: number(row[1], `daily day ${index + 1} current`),
       previous: number(row[2], `daily day ${index + 1} previous`),
     };
   });
-  if (daily.length !== 7 || daily.some((row, index) => row.day !== index + 1))
-    throw new Error("PostHog daily WAU result must contain days 1-7");
+  if (daily.length !== 7) throw new Error("PostHog daily WAU result must contain 7 days");
   return {
     fetchedAt: new Date().toISOString(),
     currentWau: scalar(WAU_TILES.currentWau, "current WAU"),
