@@ -620,7 +620,7 @@ wauChart.position.set(930, 68);
 wauPanel.addChild(wauChart);
 const chartTitle = label("NEW WAU / DAY", 20, C.dim);
 wauChart.addChild(chartTitle);
-const currentLegend = label("● THIS WEEK", 18, C.green);
+const currentLegend = label("● THIS WEEK", 18, C.amber);
 currentLegend.position.set(500, 2);
 wauChart.addChild(currentLegend);
 const previousLegend = label("● LAST WEEK", 18, C.info);
@@ -694,7 +694,7 @@ function renderWau(data, stale = false) {
     .stroke({ width: 1, color: C.panelEdge, alpha: 0.5 });
   for (const [row, [key, color, offset]] of [
     ["previous", C.info, -barWidth],
-    ["current", C.green, 0],
+    ["current", C.amber, 0],
   ].entries()) {
     snapshot.daily.forEach((point, index) => {
       const top = y(point[key]);
