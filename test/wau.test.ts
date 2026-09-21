@@ -38,7 +38,7 @@ const dashboard = () => ({
     tile(7122309, [["33.7%"]]),
     tile(10992630, [["4.5%"]]),
     tile(
-      7119742,
+      7119735,
       Array.from({ length: 7 }, (_, day) => [`Day ${day + 1}`, 1000 + day, 900 + day]),
     ),
   ],
@@ -67,7 +67,7 @@ test("the WAU route requests and normalizes the five saved dashboard tiles", asy
   const url = new URL(request.url!, base);
   expect(url.pathname).toBe("/api/projects/196853/dashboards/1468050/run_insights/");
   expect(url.searchParams.get("tile_ids")).toBe(
-    "7119738,7119740,7122309,10992630,7119742",
+    "7119738,7119740,7122309,10992630,7119735",
   );
   expect(url.searchParams.get("refresh")).toBe("blocking");
   expect(url.searchParams.get("output_format")).toBe("json");
@@ -77,7 +77,7 @@ test("the WAU route requests and normalizes the five saved dashboard tiles", asy
     targetWau: 17518,
     targetPercent: 33.7,
     activationPercent: 4.5,
-    cumulative: Array.from({ length: 7 }, (_, day) => ({
+    daily: Array.from({ length: 7 }, (_, day) => ({
       day: day + 1,
       current: 1000 + day,
       previous: 900 + day,
@@ -128,8 +128,8 @@ test.each([
   ["malformed", { results: "nope" }],
   ["missing a required tile", { results: dashboard().results.slice(1) }],
   [
-    "missing a cumulative day",
-    { results: dashboard().results.map((item) => item.id === 7119742 ? tile(7119742, item.insight.result.slice(0, 6)) : item) },
+    "missing a daily result",
+    { results: dashboard().results.map((item) => item.id === 7119735 ? tile(7119735, item.insight.result.slice(0, 6)) : item) },
   ],
 ])("the WAU route rejects %s PostHog data", async (_name, body) => {
   const base = await upstream((_req, res) => {
