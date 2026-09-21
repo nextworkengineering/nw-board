@@ -129,7 +129,11 @@ test.each([
   ["missing a required tile", { results: dashboard().results.slice(1) }],
   [
     "missing a daily result",
-    { results: dashboard().results.map((item) => item.id === 7119735 ? tile(7119735, item.insight.result.slice(0, 6)) : item) },
+    {
+      results: dashboard().results.map((item) =>
+        item.id === 7119735 ? tile(7119735, item.insight.result.slice(0, 6)) : item,
+      ),
+    },
   ],
 ])("the WAU route rejects %s PostHog data", async (_name, body) => {
   const base = await upstream((_req, res) => {
