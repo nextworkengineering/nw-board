@@ -20,6 +20,8 @@ GITHUB_WEBHOOK_SECRET=dev npm start   # http://localhost:3000
 - `GITHUB_WEBHOOK_SECRET` is required — the server refuses to start without it.
 - `GITHUB_TOKEN` is optional locally; without it Backfill is skipped and the
   board fills from live webhooks only.
+- `POSTHOG_PERSONAL_API_KEY` enables the Weekly WAU Growth Tracker. Without it,
+  the rest of the board runs and the WAU panel shows its retrying state.
 - `PORT` defaults to 3000.
 - Real webhook deliveries need a public URL; production uses Tailscale Funnel.
   To fake an event locally, POST a signed payload to `/webhook` (see
@@ -130,4 +132,8 @@ files means the pixel trophy carries the takeover, same as ever. Drop-ins are
 picked up per merge, no restart needed.
 
 Secrets live only in `/etc/pr-arcade.env` on the Pi
-(`PORT`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_TOKEN`).
+(`PORT`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_TOKEN`, `POSTHOG_PERSONAL_API_KEY`).
+The PostHog key needs `dashboard:read` and `query:read` access to project
+`196853`; it stays on the server while the kiosk reads normalized results from
+`/wau.json`. Existing installs can add the key to that file and restart
+`pr-arcade` to enable the panel.
