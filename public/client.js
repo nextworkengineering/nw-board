@@ -513,8 +513,8 @@ Assets.load({
 // Feed panel: the last 24h of tracked events, newest at the top.
 // --------------------------------------------------------------------------------
 
-const FEED_ROWS = 12;
-const feedPanel = panel(24, 204, 1872, 756, "LIVE FEED // LAST 24H", C.ink);
+const FEED_ROWS = 7;
+const feedPanel = panel(24, 204, 1872, 496, "LIVE FEED // LAST 24H", C.ink);
 
 // Wall clock on the feed header — the board doubles as the office clock.
 const wallClock = label("", 34, C.ink);
@@ -581,8 +581,136 @@ const feedRows = Array.from({ length: FEED_ROWS }, (_, i) => {
 });
 
 // --------------------------------------------------------------------------------
-// In Flight panel: the open PRs, as cabinets on the "now playing" wall.
+// Weekly WAU: four dashboard KPIs and the current-vs-last-week cumulative build.
 // --------------------------------------------------------------------------------
+
+const wauPanel = panel(24, 712, 1872, 248, "WEEKLY WAU GROWTH", C.ink);
+const wauStatus = label("LOADING...", 24, C.dim);
+wauStatus.anchor.set(1, 0);
+wauStatus.position.set(1852, 16);
+wauPanel.addChild(wauStatus);
+
+function wauCard(x, y, title) {
+  const card = new Container();
+  card.position.set(x, y);
+  card.addChild(
+    new Graphics()
+      .roundRect(0, 0, 430, 72, 7)
+      .fill({ color: C.panelDeep, alpha: 0.72 })
+      .stroke({ width: 2, color: C.panelEdge }),
+  );
+  const caption = label(title, 18, C.dim);
+  caption.position.set(14, 8);
+  const value = label("—", 36, C.ink);
+  value.position.set(14, 29);
+  card.addChild(caption, value);
+  wauPanel.addChild(card);
+  return value;
+}
+
+const wauValues = {
+  currentWau: wauCard(20, 68, "CURRENT WAU"),
+  targetWau: wauCard(464, 68, "WEEKLY TARGET"),
+  targetPercent: wauCard(20, 150, "TARGET REACHED"),
+  activationPercent: wauCard(464, 150, "ACTIVATION RATE"),
+};
+
+const wauChart = new Container();
+wauChart.position.set(930, 68);
+wauPanel.addChild(wauChart);
+const chartTitle = label("CUMULATIVE BUILD", 20, C.dim);
+wauChart.addChild(chartTitle);
+const currentLegend = label("● THIS WEEK", 18, C.green);
+currentLegend.position.set(338, 2);
+wauChart.addChild(currentLegend);
+const previousLegend = label("● LAST WEEK", 18, C.info);
+previousLegend.position.set(500, 2);
+wauChart.addChild(previousLegend);
+const chartLines = new Graphics();
+wauChart.addChild(chartLines);
+const dayLabels = Array.from({ length: 7 }, (_, index) => {
+  const day = label(`D${index + 1}`, 16, C.dim);
+  day.anchor.set(0.5, 0);
+  wauChart.addChild(day);
+  return day;
+});
+const wauUnavailable = label("WAU DATA UNAVAILABLE — RETRYING", 24, C.dim);
+wauUnavailable.anchor.set(0.5);
+wauUnavailable.position.set(1378, 154);
+wauPanel.addChild(wauUnavailable);
+
+let latestWau = null;
+function renderWau(data, stale = false) {
+  latestWau = data;
+  const snapshot = data;
+  wauUnavailable.visible = !snapshot;
+  wauChart.visible = Boolean(snapshot);
+  for (const value of Object.values(wauValues)) value.text = "—";
+  if (!snapshot) {
+    wauStatus.text = "UNAVAILABLE // RETRYING";
+    wauStatus.style.fill = C.red;
+    return;
+  }
+
+  const whole = new Intl.NumberFormat().format;
+  wauValues.currentWau.text = whole(snapshot.currentWau);
+  wauValues.targetWau.text = whole(snapshot.targetWau);
+  wauValues.targetPercent.text = `${snapshot.targetPercent}%`;
+  wauValues.activationPercent.text = `${snapshot.activationPercent}%`;
+  const updated = new Date(snapshot.fetchedAt)
+    .toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })
+    .toUpperCase();
+  wauStatus.text = stale ? `STALE // ${updated} // RETRYING` : `UPDATED ${updated}`;
+  wauStatus.style.fill = stale ? C.red : C.green;
+
+  const plot = { x: 8, y: 38, width: 900, height: 116 };
+  const max = Math.max(
+    1,
+    ...snapshot.cumulative.flatMap((point) => [point.current, point.previous]),
+  );
+  const x = (index) => plot.x + (plot.width * index) / 6;
+  const y = (value) => plot.y + plot.height - (value / max) * plot.height;
+  chartLines
+    .clear()
+    .moveTo(plot.x, plot.y + plot.height)
+    .lineTo(plot.x + plot.width, plot.y + plot.height)
+    .stroke({ width: 2, color: C.panelEdge })
+    .moveTo(plot.x, plot.y + plot.height / 2)
+    .lineTo(plot.x + plot.width, plot.y + plot.height / 2)
+    .stroke({ width: 1, color: C.panelEdge, alpha: 0.5 });
+  for (const [key, color] of [["previous", C.info], ["current", C.green]]) {
+    snapshot.cumulative.forEach((point, index) => {
+      if (index === 0) chartLines.moveTo(x(index), y(point[key]));
+      else chartLines.lineTo(x(index), y(point[key]));
+    });
+    chartLines.stroke({ width: 4, color });
+    snapshot.cumulative.forEach((point, index) =>
+      chartLines.circle(x(index), y(point[key]), 4).fill(color),
+    );
+  }
+  dayLabels.forEach((day, index) => day.position.set(x(index), plot.y + plot.height + 5));
+}
+
+const WAU_REFRESH_MS = 15 * 60 * 1000;
+async function loadWau() {
+  try {
+    const response = await fetch("/wau.json", { cache: "no-store" });
+    if (!response.ok) throw new Error(`WAU dashboard returned ${response.status}`);
+    const next = await response.json();
+    if (
+      ![next.currentWau, next.targetWau, next.targetPercent, next.activationPercent].every(
+        Number.isFinite,
+      ) ||
+      !Array.isArray(next.cumulative) ||
+      next.cumulative.length !== 7
+    )
+      throw new Error("invalid WAU dashboard data");
+    renderWau(next);
+  } catch (error) {
+    console.warn(error);
+    renderWau(latestWau, true);
+  }
+}
 
 // --------------------------------------------------------------------------------
 // AI News ticker: RSS headlines loop forever across a strip at the bottom.
@@ -1393,8 +1521,11 @@ function connect() {
 connect();
 
 renderFeed();
+renderWau(null);
 renderHeadlines([]);
+void loadWau();
 void loadHeadlines();
+setInterval(() => void loadWau(), WAU_REFRESH_MS);
 setInterval(() => void loadHeadlines(), NEWS_REFRESH_MS);
 
 // Visual QA hook: the canvas can only be checked by a human, so every animation and
@@ -1407,6 +1538,8 @@ setInterval(() => void loadHeadlines(), NEWS_REFRESH_MS);
 //   hear it with arcade.play("pr-opened") or arcade.event({...,"audible":true})
 //   arcade.setMvp({names:["Maximus"],count:12}) / arcade.setMvp(null) — marquee MVP
 //   arcade.setDevDeploy({actor:"Maximus"}) / arcade.setDevDeploy(null) — feed header
+//   arcade.setWau() / arcade.setWau(undefined, true) / arcade.setWau(null, true)
+//     — sample success / stale / unavailable WAU states
 //   arcade.setHeadlines(["A very important AI headline"]) — bottom news ticker
 const sample = (type) => ({
   type,
@@ -1415,6 +1548,18 @@ const sample = (type) => ({
   title: "Demo pull request",
   actor: "demo-user",
 });
+const sampleWau = {
+  fetchedAt: new Date().toISOString(),
+  currentWau: 5906,
+  targetWau: 17518,
+  targetPercent: 33.7,
+  activationPercent: 4.5,
+  cumulative: [2869, 4548, 5907, 5907, 5907, 5907, 5907].map((current, index) => ({
+    day: index + 1,
+    current,
+    previous: [2384, 4329, 6432, 8699, 10447, 12329, 14189][index],
+  })),
+};
 // ?demo: auto-run the full tour shortly after load — lets a plain URL show the
 // board off with no console. Audio needs one click/tap (browser autoplay rules);
 // the resume listener below turns that first click into sound for the rest.
@@ -1429,6 +1574,7 @@ window.arcade = {
   play,
   setMvp,
   setDevDeploy,
+  setWau: (data, stale = false) => renderWau(data === undefined ? sampleWau : data, stale),
   setHeadlines: renderHeadlines,
   event: handleMessage,
   demo() {

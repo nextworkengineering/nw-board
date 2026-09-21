@@ -31,7 +31,7 @@ Pulls, runs `npm ci` only if `package.json`/`package-lock.json` changed, restart
 
 ## Notes
 
-- **Secrets** live only in `/etc/pr-arcade.env`, mode 0600, owned by the display user. Never in the repo. Contains `PORT`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_TOKEN`.
+- **Secrets** live only in `/etc/pr-arcade.env`, mode 0600, owned by the display user. Never in the repo. Contains `PORT`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_TOKEN`, and the `dashboard:read` + `query:read` `POSTHOG_PERSONAL_API_KEY` used by the WAU panel.
 - **Funnel exposes the whole static tree**, not just the webhook: that now includes the vendored commercial woff2 fonts and any celebration clips. Scope it with `tailscale funnel --set-path=/webhook 3000` so only the webhook is public.
 - **Display flags**, appended to the kiosk URL in `kiosk.sh`: `?fps` shows the frame rate and which renderer WebGL actually gave us, `?demo` runs the full animation tour once.
 - **Tracked Repos** live in `config.json` at the repo root, alongside the roster and the chime times. It is gitignored — it names your repos and your team — so it lives only on this Pi; edit it here and restart. `cp config.example.json config.json` to start one. The server won't start without it.

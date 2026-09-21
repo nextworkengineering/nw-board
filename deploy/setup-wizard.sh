@@ -461,6 +461,16 @@ else
   step "Generate token, then copy it."
 fi
 ask_secret GITHUB_TOKEN "Paste a token (input hidden; Enter keeps current / skips):"
+say ""
+if [[ -n "$(_existing POSTHOG_PERSONAL_API_KEY || true)" ]]; then
+  ok "a POSTHOG_PERSONAL_API_KEY is already configured — just press Enter to keep it"
+else
+  say "Now a PostHog personal API key for the Weekly WAU Growth Tracker:"
+  open_url "https://us.posthog.com/settings/user-api-keys"
+  step "Create a personal API key with dashboard:read and query:read access"
+  step "Make sure it can read project 196853, then copy it"
+fi
+ask_secret POSTHOG_PERSONAL_API_KEY "Paste the PostHog key (input hidden; Enter keeps current / skips):"
 write_env PORT "$PORT"
 write_env GITHUB_WEBHOOK_SECRET "$WEBHOOK_SECRET"
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then
@@ -468,10 +478,18 @@ if [[ -n "${GITHUB_TOKEN:-}" ]]; then
 else
   SKIPPED+=("GITHUB_TOKEN in $ENV_TARGET — add it and: sudo systemctl restart pr-arcade")
 fi
+if [[ -n "${POSTHOG_PERSONAL_API_KEY:-}" ]]; then
+  write_env POSTHOG_PERSONAL_API_KEY "$POSTHOG_PERSONAL_API_KEY"
+else
+  SKIPPED+=("POSTHOG_PERSONAL_API_KEY in $ENV_TARGET — the WAU panel will keep retrying")
+fi
 install_env_file
 verify "$ENV_TARGET is 0600" \
   bash -c "[[ \"\$(stat -c %a $ENV_TARGET)\" == 600 ]]"
 verify "webhook secret is in place" grep -q '^GITHUB_WEBHOOK_SECRET=' "$ENV_TARGET"
+if [[ -n "${POSTHOG_PERSONAL_API_KEY:-}" ]]; then
+  verify "PostHog key is in place" grep -q '^POSTHOG_PERSONAL_API_KEY=' "$ENV_TARGET"
+fi
 pause "Enter to install the services"
 
 # ── 7 ─────────────────────────────────────────────────────────────────────

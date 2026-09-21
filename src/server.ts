@@ -101,6 +101,10 @@ type Options = {
   reconcileMs?: number;
   /** How long the news-feed proxy waits for its configured upstream. */
   newsTimeoutMs?: number;
+  /** Root of the PostHog API; tests point this at a stub. */
+  posthogApiBase?: string;
+  /** How long the WAU dashboard proxy waits for PostHog. */
+  posthogTimeoutMs?: number;
 };
 
 /** Monday 00:00 local time of the week containing `at` — the dedup window. */
@@ -114,9 +118,54 @@ function startOfWeek(at: number) {
 /** Local midnight of the day containing `at` — today's MVP starts here. */
 const startOfDay = (at: number) => new Date(at).setHours(0, 0, 0, 0);
 
-const NEWS_MAX_BYTES = 1024 * 1024;
+const UPSTREAM_MAX_BYTES = 1024 * 1024;
+const POSTHOG_PROJECT = 196853;
+const POSTHOG_DASHBOARD = 1468050;
+const WAU_TILES = {
+  currentWau: 7119738,
+  targetWau: 7119740,
+  targetPercent: 7122309,
+  activationPercent: 10992630,
+  cumulative: 7119742,
+} as const;
 
-async function limitedText(response: Response) {
+function normalizeWauDashboard(payload: any) {
+  const tiles = Array.isArray(payload) ? payload : payload?.results;
+  if (!Array.isArray(tiles)) throw new Error("PostHog dashboard has no results list");
+  const result = (id: number) => {
+    const value = tiles.find((tile: any) => tile?.id === id)?.insight?.result;
+    if (!Array.isArray(value)) throw new Error(`PostHog tile ${id} has no result`);
+    return value;
+  };
+  const number = (value: unknown, name: string) => {
+    const parsed = typeof value === "string" ? Number(value.replace(/%$/, "")) : value;
+    if (typeof parsed !== "number" || !Number.isFinite(parsed))
+      throw new Error(`PostHog ${name} is not numeric`);
+    return parsed;
+  };
+  const scalar = (id: number, name: string) => number(result(id)?.[0]?.[0], name);
+  const cumulative = result(WAU_TILES.cumulative).map((row: unknown, index: number) => {
+    if (!Array.isArray(row) || !/^Day [1-7]$/.test(String(row[0])))
+      throw new Error("PostHog cumulative WAU row is malformed");
+    return {
+      day: Number(String(row[0]).slice(4)),
+      current: number(row[1], `cumulative day ${index + 1} current`),
+      previous: number(row[2], `cumulative day ${index + 1} previous`),
+    };
+  });
+  if (cumulative.length !== 7 || cumulative.some((row, index) => row.day !== index + 1))
+    throw new Error("PostHog cumulative WAU result must contain days 1-7");
+  return {
+    fetchedAt: new Date().toISOString(),
+    currentWau: scalar(WAU_TILES.currentWau, "current WAU"),
+    targetWau: scalar(WAU_TILES.targetWau, "target WAU"),
+    targetPercent: scalar(WAU_TILES.targetPercent, "target percent"),
+    activationPercent: scalar(WAU_TILES.activationPercent, "activation percent"),
+    cumulative,
+  };
+}
+
+async function limitedText(response: Response, complaint = "news feed exceeds 1 MiB") {
   if (!response.body) return "";
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -126,9 +175,9 @@ async function limitedText(response: Response) {
     const { done, value } = await reader.read();
     if (done) return text + decoder.decode();
     bytes += value.byteLength;
-    if (bytes > NEWS_MAX_BYTES) {
+    if (bytes > UPSTREAM_MAX_BYTES) {
       await reader.cancel();
-      throw new Error("news feed exceeds 1 MiB");
+      throw new Error(complaint);
     }
     text += decoder.decode(value, { stream: true });
   }
@@ -394,6 +443,36 @@ export async function startServer(port: number, options: Options = {}) {
       res.type("application/xml").send(await limitedText(response));
     } catch (error) {
       console.warn(`News feed unavailable: ${error}`);
+      res.sendStatus(502);
+    }
+  });
+
+  // The credential stays on the server and the destination is fixed: the kiosk can
+  // read the five saved insights, but it cannot turn this route into a general proxy.
+  app.get("/wau.json", async (_req, res) => {
+    const token = process.env.POSTHOG_PERSONAL_API_KEY;
+    if (!token) {
+      res.sendStatus(503);
+      return;
+    }
+    const base = options.posthogApiBase ?? "https://us.posthog.com";
+    const url = new URL(
+      `/api/projects/${POSTHOG_PROJECT}/dashboards/${POSTHOG_DASHBOARD}/run_insights/`,
+      base,
+    );
+    url.searchParams.set("tile_ids", Object.values(WAU_TILES).join(","));
+    url.searchParams.set("refresh", "blocking");
+    url.searchParams.set("output_format", "json");
+    try {
+      const response = await fetch(url, {
+        headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+        signal: AbortSignal.timeout(options.posthogTimeoutMs ?? 10_000),
+      });
+      if (!response.ok) throw new Error(`PostHog returned ${response.status}`);
+      const payload = await limitedText(response, "WAU dashboard response exceeds 1 MiB");
+      res.set("Cache-Control", "no-store").json(normalizeWauDashboard(JSON.parse(payload)));
+    } catch (error) {
+      console.warn(`WAU dashboard unavailable: ${error}`);
       res.sendStatus(502);
     }
   });
