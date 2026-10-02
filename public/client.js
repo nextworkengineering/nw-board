@@ -103,8 +103,8 @@ fitToWindow();
 // software rendering and explains any slow motion better than guessing.
 // An average hides judder, so it also counts the frames that blew the 60Hz budget
 // (>25ms) and the worst one, per 5s. elapsedMS is the raw gap; deltaMS is capped.
-// Each 5s line is also logged, so the kiosk's journal carries it (kiosk.sh turns
-// on Chromium's console logging alongside ?fps) and nobody has to read it off the TV.
+// Each 5s line is also posted to the server, which logs it to `journalctl -u pr-arcade`,
+// so nobody has to read it off the TV. (Pi OS Chromium drops page console output.)
 if (location.search.includes("fps")) {
   let rendererName = "unknown";
   try {
@@ -127,7 +127,8 @@ if (location.search.includes("fps")) {
   });
   setInterval(() => {
     pacing = `${slow} slow / worst ${worst.toFixed(0)}ms (5s)`;
-    console.log(`fps: ${app.ticker.FPS.toFixed(0)} FPS — ${rendererName} — ${pacing}`);
+    const line = `${app.ticker.FPS.toFixed(0)} FPS — ${rendererName} — ${pacing}`;
+    fetch("/fps", { method: "POST", body: line }).catch(() => {});
     slow = 0;
     worst = 0;
   }, 5000);

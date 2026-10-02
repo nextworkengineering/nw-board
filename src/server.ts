@@ -580,6 +580,13 @@ export async function startServer(port: number, options: Options = {}) {
     res.sendStatus(204);
   });
 
+  // The ?fps overlay's pacing line, posted by the kiosk every 5s so it can be read
+  // with journalctl instead of off the TV.
+  app.post("/fps", piOnly, express.text({ limit: "1kb" }), (req, res) => {
+    console.log(`fps: ${String(req.body).slice(0, 200)}`);
+    res.sendStatus(204);
+  });
+
   // Swaps the Theme to ?name= by hand until local midnight (or DELETE /theme). With
   // &permanent it becomes config.theme instead, written to config.json so it survives
   // restarts. A missing or repeated ?name is a 400; one naming no Theme is a 404.
