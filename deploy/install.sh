@@ -26,6 +26,13 @@ if [ ! -f /etc/pr-arcade.env ]; then
   exit 1
 fi
 
+# The Admin Console normalizes uploaded clips with scripts/normalize-sound.py,
+# which shells out to lame to decode and re-encode them.
+if ! command -v lame >/dev/null 2>&1; then
+  echo "==> Installing lame (for Admin Console sound uploads)"
+  sudo apt-get install -y lame
+fi
+
 echo "==> Installing server unit (repo: $REPO_DIR, user: $RUN_USER, npm: $NPM)"
 sudo install -D -m 644 "$REPO_DIR/deploy/pr-arcade.service" \
   /etc/systemd/system/pr-arcade.service

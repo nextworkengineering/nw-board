@@ -80,6 +80,9 @@ export function createAudioPlayer({
 } = {}) {
   let audio;
   let lastAmbientAt = -Infinity;
+  // The clip each slot plays: the built-in defaults, overridden by whatever the
+  // Admin Console has assigned (see setSamples).
+  let samples = SAMPLES;
 
   async function ready() {
     try {
@@ -133,18 +136,36 @@ export function createAudioPlayer({
     return true;
   }
 
-  async function play(name, teammate = true) {
-    if (!SAMPLES[name] || !teammate) return fallback(name);
+  /**
+   * Play the clip at `url`, or `fallbackName`'s jingle when there is no url or the
+   * clip will not play. Scheduled messages carry their own clip rather than a slot.
+   */
+  async function playClip(url, fallbackName) {
+    if (!url) return fallback(fallbackName);
     try {
-      const clip = new AudioImpl(SAMPLES[name]);
+      const clip = new AudioImpl(url);
       clip.volume = 0.8;
       await clip.play();
       return true;
     } catch {
       // Missing optional clips and autoplay failures both use the generated jingle.
       // Awaiting fallback means this event itself survives a suspended context.
-      return fallback(name);
+      return fallback(fallbackName);
     }
+  }
+
+  async function play(name, teammate = true) {
+    if (!samples[name] || !teammate) return fallback(name);
+    return playClip(samples[name], name);
+  }
+
+  /**
+   * Follow the snapshot's slot assignments. The snapshot names only the assigned
+   * slots, so each one replaces the whole override: a slot unassigned since the
+   * last snapshot goes back to its default rather than keeping the old clip.
+   */
+  function setSamples(map) {
+    samples = { ...SAMPLES, ...map };
   }
 
   /**
@@ -163,10 +184,12 @@ export function createAudioPlayer({
     return play(event.type, event.teammate !== false);
   }
 
-  return { play, playAmbient, resume: ready };
+  return { play, playClip, playAmbient, setSamples, resume: ready };
 }
 
 const player = createAudioPlayer();
 export const play = player.play;
+export const playClip = player.playClip;
+export const setSamples = player.setSamples;
 export const playAmbient = player.playAmbient;
 export const resumeAudio = player.resume;

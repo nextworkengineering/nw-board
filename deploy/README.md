@@ -4,7 +4,7 @@ Everything needed to get from a blank SD card to a TV showing the board.
 
 | File | What it is |
 | --- | --- |
-| `setup-wizard.sh` | Interactive walkthrough of the human-only steps (OS, packages, Tailscale, Funnel, secrets, webhooks). Run it on the Pi. Re-runnable. |
+| `setup-wizard.sh` | Interactive walkthrough of the human-only steps (OS, packages, Tailscale, Funnel, Admin Console, secrets, webhooks). Run it on the Pi. Re-runnable. |
 | `install.sh` | Installs and enables both systemd units for this checkout. Called by the wizard; safe to re-run by hand. |
 | `pr-arcade.service` | System unit for the Node server. Restarts on crash, starts at boot, env from `/etc/pr-arcade.env`. |
 | `pr-arcade-kiosk.service` | User unit for the Chromium kiosk. Starts with the Pi's autologin desktop session. |
@@ -19,7 +19,7 @@ Both units deliberately omit `User`/`WorkingDirectory`/`ExecStart` — `install.
 1. Flash Raspberry Pi OS **Bookworm, 64-bit, desktop** with SSH enabled (the wizard prints the exact Imager settings).
 2. `ssh pi@pr-arcade.local`
 3. `git clone <repo-url> ~/pr-arcade && ~/pr-arcade/deploy/setup-wizard.sh`
-4. Follow the nine stages. Each one verifies itself before moving on; anything it can't do is listed again at the end.
+4. Follow the ten stages. Each one verifies itself before moving on; anything it can't do is listed again at the end.
 
 ## Updating
 
@@ -42,6 +42,28 @@ Pulls, runs `npm ci` only if `package.json`/`package-lock.json` changed, re-runs
 - **`deploy.sh` assumes passwordless sudo** (the stock Pi OS default) and git credentials that don't prompt — the wizard sets up `gh auth setup-git` or points you at a deploy key.
 - **Kiosk restarts over SSH** need a live user session (`XDG_RUNTIME_DIR`); if `deploy.sh` or `install.sh` says it skipped the kiosk, reboot the Pi or run it from the desktop session.
 
+## Admin Console
+
+Changes Themes, the Sound Library (upload mp3s, assign them to sound slots),
+Reminders and Scheduled Celebrations, Quiet Hours, Day Chimes and names, live, and
+replays the Target Hit. See the Admin Console section of the top-level `README.md`.
+
+- **URL**: `https://<tailnet-host>:8443`, from any device on the tailnet.
+- **Listens on `127.0.0.1:${ADMIN_PORT:-3001}` only.** Port 3000, which the Funnel
+  forwards, serves none of it. The wizard's Admin Console stage puts it on the
+  tailnet; by hand it's a one-time
+  `sudo tailscale serve --bg --https=8443 http://127.0.0.1:3001` (it survives reboots).
+- **Never funnel 8443**: the console has no login of its own, so anyone who could
+  reach it could change the board. Confirm with `tailscale serve status` (8443
+  reads `(tailnet only)`) and `tailscale funnel status` (8443 not `Funnel on`).
+- **Uploads** live in `public/sounds/uploads/`, gitignored and on this Pi only.
+  Back them up along with `config.json`, which records the slot assignments and
+  schedules. They're normalized by `scripts/normalize-sound.py`, which needs `lame`
+  (`install.sh` installs it if it's missing), and capped at 30 s.
+- **Nothing private in Reminders, Celebrations or clips**: they reach the TV over
+  port 3000 (its WebSocket and `/sounds/uploads/`), which the Funnel exposes unless
+  it's scoped with `--set-path=/webhook` as above.
+
 ## Poking at it
 
 ```sh
@@ -49,6 +71,7 @@ sudo systemctl status pr-arcade          # server
 journalctl -u pr-arcade -f               # server logs
 systemctl --user status pr-arcade-kiosk  # kiosk (run on the Pi's own session)
 tailscale funnel status                  # is the public URL live
+tailscale serve status                   # 8443 (Admin Console) says "tailnet only"
 curl -X POST http://127.0.0.1:3000/wau-target-hit  # replay the WAU Target Hit
 curl -X POST 'http://127.0.0.1:3000/theme?name=<name>'  # wear public/themes/<name>.js until midnight
 curl -X POST 'http://127.0.0.1:3000/theme?name=<name>&permanent'  # rewrite config.theme, survives restarts

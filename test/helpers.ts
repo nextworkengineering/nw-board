@@ -13,6 +13,9 @@ import { WebSocket } from "ws";
 
 export const SECRET = "test-webhook-secret";
 process.env.GITHUB_WEBHOOK_SECRET = SECRET;
+// Every server also opens the Admin Console listener; on its default 3001, parallel
+// test files would collide over it, so each one gets a free port instead.
+process.env.ADMIN_PORT = "0";
 // Backfill is backfill.test.ts's business (it sets its own token). Without a token
 // no other test can reach the real GitHub API with whatever PAT the shell exported.
 delete process.env.GITHUB_TOKEN;

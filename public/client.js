@@ -19,7 +19,7 @@ import {
   Text,
   Texture,
 } from "./vendor/pixi.min.mjs";
-import { play, playAmbient, resumeAudio } from "./audio.js";
+import { play, playAmbient, playClip, resumeAudio, setSamples } from "./audio.js";
 import { THEMES } from "./themes/index.js";
 
 // The scene is authored at 1080p and scaled to fit whatever the TV reports, so the
@@ -1288,7 +1288,12 @@ function showCelebrationClip(maxMs, onFail) {
 }
 
 const pending = [];
-let takeoverBusy = false;
+// One occasion on screen at a time: true while a takeover or a banner (Day Chime,
+// Reminder) is showing. A Reminder and a Scheduled Celebration fired the same
+// minute arrive back to back, and a chime can land mid-merge; without the shared
+// flag each started over the other, texts overlapping and both sounds at once.
+// Whichever waits starts when the other finishes (see the two `done`s).
+let stageBusy = false;
 
 function celebrate(type, event = {}, audible = false) {
   pending.push({ type, event, audible });
@@ -1301,7 +1306,8 @@ function celebrate(type, event = {}, audible = false) {
 // playing or queued so a reload never cuts one off. Only a theme that differs
 // from the one this page loaded with triggers one, so a reload cannot loop.
 let wantTheme = THEME_NAME;
-// Day Chimes on screen: a reload would cut the bell off mid-sound.
+// Day Chimes and Reminders on screen or waiting their turn (see queueBanner): a
+// reload would cut the bell off mid-sound.
 let chimes = 0;
 function applyTheme() {
   // Staying put (a switch called off before it happened, or the reload just
@@ -1310,7 +1316,7 @@ function applyTheme() {
     playHeldCelebration();
     return;
   }
-  if (takeoverBusy || pending.length > 0 || chimes > 0) return;
+  if (stageBusy || pending.length > 0 || chimes > 0) return;
   // Split by hand rather than URLSearchParams, which would rewrite ?fps as ?fps=.
   const params = location.search
     .slice(1)
@@ -1334,24 +1340,29 @@ function playHeldCelebration() {
 }
 
 function playNextCelebration() {
-  if (takeoverBusy) return;
+  if (stageBusy) return;
   if (pending.length === 0) {
     applyTheme();
     return;
   }
   const next = pending.shift();
-  takeoverBusy = true;
+  stageBusy = true;
+  // A Scheduled Celebration brings its own clip (or none) instead of a slot's.
+  if (next.audible && next.type === "scheduled-celebration")
+    playClip(next.event.sound, "pr-merged");
   // Old servers send no `teammate`; treat its absence as "play the sample".
-  if (next.audible) play(next.type, next.event.teammate !== false);
+  else if (next.audible) play(next.type, next.event.teammate !== false);
   const scene =
-    next.type === "pr-merged"
-      ? mergedTakeover
-      : next.type === "wau-target-hit"
-        ? wauTakeover
-        : approvedTakeover;
+    {
+      "pr-merged": mergedTakeover,
+      "wau-target-hit": wauTakeover,
+      "scheduled-celebration": scheduledTakeover,
+    }[next.type] ?? approvedTakeover;
   scene(next.event, () => {
-    takeoverBusy = false;
-    playNextCelebration();
+    stageBusy = false;
+    // A banner that waited out this takeover goes before any further takeovers.
+    if (banners.length) nextBanner();
+    else playNextCelebration();
   });
 }
 
@@ -1428,6 +1439,25 @@ function takeoverScene(headline, color, event, verb) {
   };
   fit();
   return { scene, dim, banner, caption, credit, creditRow, fit };
+}
+
+/**
+ * Wrap `text` to `width` and step its font down until it stands no taller than
+ * `height`. Admin Console copy runs to 120 characters: shrinking that onto one line
+ * would leave a sliver nobody can read across the room. The floor stays on the
+ * display face; returns the scale still needed if even the floor is too tall.
+ */
+function fitWrapped(text, width, height) {
+  Object.assign(text.style, { wordWrap: true, wordWrapWidth: width, breakWords: true, align: "center" });
+  while (text.height > height && text.style.fontSize > 56) {
+    const size = Math.max(56, Math.round(text.style.fontSize * 0.85));
+    Object.assign(text.style, {
+      fontSize: size,
+      fontFamily: T.type.family(size),
+      letterSpacing: T.type.tracking(size),
+    });
+  }
+  return Math.min(1, height / text.height);
 }
 
 /** pr-merged: the big one — flash, confetti rain, fireworks, bouncing headline. */
@@ -1602,6 +1632,68 @@ function wauTakeover(event, done) {
   );
 }
 
+/**
+ * scheduled-celebration: an Admin Console message given the merge's confetti and
+ * fireworks. No PR and no Actor, so the caption and credit stay empty and the
+ * headline takes the middle of the card, wrapped to fit. Longer than a merge, so
+ * the whole message gets read.
+ */
+function scheduledTakeover(event, done) {
+  const { scene, dim, banner, fit } = takeoverScene(String(event.text ?? ""), C.amber, {}, "");
+  const scale = fitWrapped(banner, 1640, 300);
+  banner.scale.set(scale);
+  fit();
+  // The card's middle (see takeoverScene's fit): nothing sits under the headline.
+  const y = H / 2 + 25;
+  banner.y = y;
+
+  // Behind the copy, just above the dim: a merge's two words survive confetti on
+  // top, a sentence does not.
+  const fx = scene.addChildAt(new Container(), 1);
+  const confetti = particles(fx, 110, () => {
+    const piece = new Sprite(dotTexture());
+    piece.anchor.set(0.5);
+    piece.scale.set(6 + Math.random() * 6);
+    piece.tint = [C.amber, C.magenta, C.green, C.ink, C.orange][
+      Math.floor(Math.random() * 5)
+    ];
+    piece.position.set(Math.random() * W, -Math.random() * H);
+    piece.vx = (Math.random() - 0.5) * 2;
+    piece.vy = 3 + Math.random() * 5;
+    piece.spin = (Math.random() - 0.5) * 0.3;
+    return piece;
+  });
+
+  const fireworks = particles(fx, 36, () => {
+    const spark = new Sprite(pixelTexture("star"));
+    spark.anchor.set(0.5);
+    spark.scale.set(3);
+    spark.tint = [C.amber, C.magenta, C.ink][Math.floor(Math.random() * 3)];
+    spark.position.set(W / 2, y);
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 4 + Math.random() * 8;
+    spark.vx = Math.cos(angle) * speed;
+    spark.vy = Math.sin(angle) * speed;
+    spark.spin = 0.1;
+    return spark;
+  });
+
+  runScene(
+    layers.takeover,
+    scene,
+    8000,
+    (progress, elapsed, delta) => {
+      dim.alpha = Math.min(progress * 6, ON_CARD ? 1 : 0.85) * (progress > 0.88 ? (1 - progress) / 0.12 : 1);
+      banner.scale.set(scale * Math.min(elapsed / 220, 1) * (1 + Math.sin(elapsed / 160) * 0.06));
+      banner.y = y + Math.sin(elapsed / 200) * 18;
+      stepParticles(confetti, delta, 0.12);
+      stepParticles(fireworks, delta, 0.1);
+      for (const spark of fireworks) spark.alpha = 1 - progress;
+    },
+    done,
+  );
+}
+
 /** review-approved: a stamp slamming down inside an expanding shockwave ring. */
 function approvedTakeover(event, done) {
   const { scene, dim, banner, caption, creditRow } = takeoverScene(
@@ -1764,11 +1856,38 @@ const AMBIENT = {
 };
 const ambient = (type) => AMBIENT[type]?.();
 
+// Day Chimes and Reminders share the middle of the screen, so one fired the same
+// minute as another (a 09:00 Reminder lands with the 09:00 chime) waits its turn
+// instead of drawing over it. `show` gets the `done` it must call once.
+// It also waits out a takeover, and a takeover waits for it (see stageBusy).
+const banners = [];
+function queueBanner(show) {
+  banners.push(show);
+  chimes++;
+  nextBanner();
+}
+function nextBanner() {
+  if (stageBusy) return;
+  const show = banners.shift();
+  if (!show) return applyTheme();
+  stageBusy = true;
+  show(() => {
+    stageBusy = false;
+    chimes--;
+    // A takeover that waited out this banner goes before any further banners.
+    if (pending.length) playNextCelebration();
+    else nextBanner();
+  });
+}
+
 /** Day Chime: a banner sweeps across the marquee line and the bell plays. */
-function chime(at = "") {
+function chime(at = "", last = at === "17:00") {
+  queueBanner((done) => chimeScene(at, last, done));
+}
+
+function chimeScene(at, endOfDay, done) {
   // Neobrutal sets the chime on the takeover card, every line in ink.
   const scene = ON_CARD ? tilted() : new Container();
-  const endOfDay = at === "17:00";
   play(endOfDay ? "day-chime" : "day-start");
   // Headline stays arcade; the practical call-to-action rides beneath it.
   const headline = endOfDay
@@ -1829,11 +1948,51 @@ function chime(at = "") {
     rows.forEach((row, i) => {
       if (i > 0) row.alpha = Math.min(Math.max((elapsed - 600 * i) / 500, 0), 1) * fade;
     });
-  }, () => {
-    chimes--;
-    applyTheme();
-  });
-  if (shown) chimes++;
+  }, done);
+  if (!shown) done();
+}
+
+/**
+ * Reminder: an Admin Console message on the Day Chime's banner for the same 10s,
+ * with its clip (or the bell's jingle) when Quiet Hours allow. Not a takeover and
+ * never a Feed row. Somebody scheduled it, so unlike the chime it does not yield
+ * to the ambient-scene cap.
+ */
+function reminder({ text, sound = null, audible = false }, done) {
+  if (audible) playClip(sound, "day-chime");
+  const scene = ON_CARD ? tilted() : new Container();
+  const line = label(
+    String(text ?? ""),
+    72,
+    ON_CARD ? C.ink : C.heroInk,
+    ON_CARD
+      ? undefined
+      : { dropShadow: { color: C.bg, distance: 4, blur: 0, angle: Math.PI / 4, alpha: 1 } },
+  );
+  const fit = fitWrapped(line, 1760, 240);
+  const height = line.height * fit;
+  if (ON_CARD) {
+    scene.addChild(card(new Graphics(), Math.min(line.width * fit + 160, W - 40), height + 120, H / 2));
+  } else {
+    const backing = new Sprite(dotTexture());
+    backing.anchor.set(0.5);
+    backing.width = W;
+    backing.height = height + 140;
+    backing.tint = C.bg;
+    backing.alpha = 0.85;
+    backing.position.set(W / 2, H / 2);
+    scene.addChild(backing);
+  }
+  line.anchor.set(0.5);
+  line.position.set(W / 2, H / 2);
+  scene.addChild(line);
+
+  runScene(layers.fx, scene, 10_000, (progress) => {
+    const fade =
+      progress < 0.05 ? progress / 0.05 : progress > 0.92 ? (1 - progress) / 0.08 : 1;
+    scene.alpha = fade;
+    line.scale.set((0.9 + fade * 0.1) * fit);
+  }, done);
 }
 
 // --------------------------------------------------------------------------------
@@ -1875,14 +2034,28 @@ app.ticker.add((ticker) => {
 // nobody. Events that make a sound — the Celebrations plus pr-opened — carry
 // audible:true|false (Quiet Hours) and teammate:true|false (clip or jingle);
 // every other Ambient Event carries neither and stays silent. And
-//   {type:"day-chime", at:"HH:MM"} marks the start and end of the workday.
+//   {type:"day-chime", at:"HH:MM", last} marks the start and end of the workday;
+//   last:true is the day's final chime (old servers send none: 17:00 is the end).
 //   {type:"wau-target-hit", audible, currentWau, targetWau, targetPercent} is a
 //   Celebration with no PR: it takes the board over but never joins the Feed.
+//   {type:"reminder", text, sound, audible} is a scheduled banner and
+//   {type:"scheduled-celebration", text, sound, audible} a scheduled takeover, both
+//   from the Admin Console; sound is "sounds/….mp3" or null (jingle). No Feed row.
+//   The snapshot's sounds:{slot:"sounds/….mp3"} names the Admin Console's assigned
+//   slots; absent (old servers) keeps the clips the page has.
 // --------------------------------------------------------------------------------
 
 function handleMessage(data) {
   if (data.type === "day-chime") {
-    chime(data.at ?? "");
+    chime(data.at ?? "", data.last ?? data.at === "17:00");
+    return;
+  }
+  if (data.type === "reminder") {
+    queueBanner((done) => reminder(data, done));
+    return;
+  }
+  if (data.type === "scheduled-celebration") {
+    celebrate(data.type, data, Boolean(data.audible));
     return;
   }
   // Not a PR, so no Feed row — renderFeed would trip over the missing repo.
@@ -1906,6 +2079,7 @@ function handleMessage(data) {
       wantTheme = data.theme;
       applyTheme();
     }
+    if (data.sounds) setSamples(data.sounds);
     feed = data.feed.map(stamp);
     currentMvp = data.mvp;
     setMvp(currentMvp);
@@ -1960,6 +2134,8 @@ playHeldCelebration();
 //   arcade.event({type:"pr-merged", repo:"a/b", number:7, title:"x", audible:true})
 //   arcade.celebrate("review-approved") / arcade.ambient("pr-comment") / arcade.chime("09:00")
 //   arcade.celebrate("wau-target-hit") — the WAU target takeover with sample numbers
+//   arcade.celebrate("scheduled-celebration") / arcade.reminder("Standup in 5")
+//     — the Admin Console's scheduled takeover and banner with sample copy
 //   arcade.play("pr-merged")           — sound only
 //   arcade.ambient() animates silently; pr-opened's sound rides the audible flag, so
 //   hear it with arcade.play("pr-opened") or arcade.event({...,"audible":true})
@@ -2004,9 +2180,13 @@ window.arcade = {
       type,
       type === "wau-target-hit"
         ? { type, currentWau: 17602, targetWau: sampleWau.targetWau, targetPercent: 100.5 }
-        : sample(type),
+        : type === "scheduled-celebration"
+          ? { type, text: "Happy birthday Maximus! Cake in the kitchen at 3pm", sound: null }
+          : sample(type),
       audible,
     ),
+  reminder: (text = "Sprint review in 10 minutes. Grab a coffee and bring your demos!", sound = null) =>
+    handleMessage({ type: "reminder", text, sound, audible: true }),
   ambient,
   chime,
   play,

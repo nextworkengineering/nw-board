@@ -13,16 +13,17 @@ result is only one mp3 generation from source:
 Usage:
     python3 scripts/normalize-sound.py ~/Downloads/foo.mp3 public/sounds/foo.mp3
 
-Needs `lame` (brew install lame); macOS `afconvert` does the decoding. Bitrate
-defaults to whatever the source used.
+Needs `lame` for both encoding and decoding: `brew install lame` on macOS,
+`sudo apt install lame` on the Pi. Bitrate defaults to whatever the source used,
+read from its mp3 frame headers. The Admin Console runs this on every upload.
 """
 
 import argparse
 import math
-import re
 import struct
 import subprocess
 import sys
+import tempfile
 import wave
 
 # The level every clip is normalized to. Chosen as the loudest all three original
@@ -41,11 +42,15 @@ PEAK_CEILING_DB = -1.5
 LEAD_IN_S = 0.25
 # Treat anything below this as silence when finding where a clip really starts.
 FLOOR = 0.005
+# The longest clip accepted. Every sample is held in Python lists, several times over,
+# so memory grows with length: a 4-minute song peaked at 4.5 GB, more than a Pi has.
+# A board clip is a few seconds; 30 s leaves room for a long fanfare.
+MAX_SECONDS = 30
 
 
 def decode(src, dst):
     subprocess.run(
-        ["afconvert", "-f", "WAVE", "-d", "LEI16", src, dst],
+        ["lame", "--decode", "--quiet", src, dst],  # 16-bit PCM WAV
         check=True,
         capture_output=True,
     )
@@ -113,10 +118,44 @@ def measure(samples, rate, channels):
     return db(peak), db(rms), lead
 
 
+# Layer III bitrates (kbps) by header index, for MPEG1 and for MPEG2/2.5.
+KBPS = {
+    3: (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320),
+    2: (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
+}
+# Sample rates by header index, keyed by the version bits (3 MPEG1, 2 MPEG2, 0 MPEG2.5).
+RATES = {3: (44100, 48000, 32000), 2: (22050, 24000, 16000), 0: (11025, 12000, 8000)}
+
+
 def source_bitrate(path):
-    out = subprocess.run(["afinfo", path], capture_output=True, text=True).stdout
-    found = re.search(r"bit rate: (\d+) bits", out)
-    return round(int(found.group(1)) / 1000) if found else 128
+    """kbps of the first MPEG Layer III frame, past any ID3v2 tag. A VBR file opens
+    with a Xing frame whose own bitrate means nothing, so average over the file from
+    its frame and byte counts instead. 128 if no frame can be found."""
+    with open(path, "rb") as f:
+        data = f.read()
+    start = 0
+    if data[:3] == b"ID3" and len(data) >= 10:
+        size = 0
+        for b in data[6:10]:
+            size = size << 7 | b & 0x7F
+        start = 10 + size + (10 if data[5] & 0x10 else 0)
+    for i in range(start, len(data) - 3):
+        if data[i] != 0xFF or data[i + 1] & 0xE0 != 0xE0:
+            continue
+        version, layer = data[i + 1] >> 3 & 3, data[i + 1] >> 1 & 3
+        index, rate_index = data[i + 2] >> 4, data[i + 2] >> 2 & 3
+        if version == 1 or layer != 1 or index in (0, 15) or rate_index == 3:
+            continue
+        mono = data[i + 3] >> 6 == 3
+        side = (17 if mono else 32) if version == 3 else (9 if mono else 17)
+        tag = data[i + 4 + side : i + 20 + side]
+        if len(tag) == 16 and tag[:4] == b"Xing" and tag[7] & 3 == 3:
+            frames, size = struct.unpack(">II", tag[8:16])
+            seconds = frames * (1152 if version == 3 else 576) / RATES[version][rate_index]
+            if seconds:
+                return round(size * 8 / seconds / 1000)
+        return KBPS[3 if version == 3 else 2][index]
+    return 128
 
 
 def main():
@@ -126,8 +165,17 @@ def main():
     ap.add_argument("--bitrate", type=int, help="kbps (default: match the source)")
     args = ap.parse_args()
 
-    decode(args.source, "/tmp/normalize-src.wav")
-    samples, (rate, channels, width) = read("/tmp/normalize-src.wav")
+    tmp = tempfile.TemporaryDirectory()
+    src_wav, out_wav, check_wav = (f"{tmp.name}/{n}.wav" for n in ("src", "out", "check"))
+
+    decode(args.source, src_wav)
+    # Checked from the header, before a single sample is read into memory.
+    with wave.open(src_wav) as r:
+        seconds = r.getnframes() / r.getframerate()
+    if seconds > MAX_SECONDS:
+        tmp.cleanup()
+        sys.exit(f"{args.source} is {seconds:.0f} s long; clips are capped at {MAX_SECONDS} s")
+    samples, (rate, channels, width) = read(src_wav)
     peak_db, rms_db, lead = measure(samples, rate, channels)
 
     gain_db = TARGET_RMS_DB - rms_db
@@ -146,7 +194,7 @@ def main():
     out = [0] * (int(pad * rate) * channels)
     out += [max(-32768, min(32767, int(round(s * factor)))) for s in samples]
 
-    with wave.open("/tmp/normalize-out.wav", "wb") as w:
+    with wave.open(out_wav, "wb") as w:
         w.setnchannels(channels)
         w.setsampwidth(width)
         w.setframerate(rate)
@@ -154,12 +202,12 @@ def main():
 
     bitrate = args.bitrate or source_bitrate(args.source)
     subprocess.run(
-        ["lame", "-b", str(bitrate), "--quiet", "/tmp/normalize-out.wav", args.dest],
+        ["lame", "-b", str(bitrate), "--quiet", out_wav, args.dest],
         check=True,
     )
 
-    decode(args.dest, "/tmp/normalize-check.wav")
-    check, (rate2, channels2, _) = read("/tmp/normalize-check.wav")
+    decode(args.dest, check_wav)
+    check, (rate2, channels2, _) = read(check_wav)
     new_peak, new_rms, new_lead = measure(check, rate2, channels2)
     print(f"{args.source} -> {args.dest} @ {bitrate}kbps")
     print(f"  loudness {rms_db:7.2f} -> {new_rms:7.2f} dBFS  (target {TARGET_RMS_DB})")

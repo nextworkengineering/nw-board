@@ -152,7 +152,7 @@ finish() {
 # Replace the example below. Set TOTAL_STAGES to match the stages you write.
 # ──────────────────────────────────────────────────────────────────────────
 
-TOTAL_STAGES=9
+TOTAL_STAGES=10
 
 # ── Wizard-local helpers ──────────────────────────────────────────────────
 
@@ -181,6 +181,7 @@ run() {
 }
 
 PORT="${PORT:-3000}"
+ADMIN_PORT="${ADMIN_PORT:-3001}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE_USER="$(id -un)"
 ENV_TARGET=/etc/pr-arcade.env
@@ -273,7 +274,7 @@ fi
 pause "Enter for the package install"
 
 # ── 2 ─────────────────────────────────────────────────────────────────────
-stage "Packages — Node 22, git, Chromium"
+stage "Packages — Node 22, git, Chromium, lame"
 say "Installing everything the server and the kiosk need. Takes a few minutes."
 if [[ "$(node -v 2>/dev/null || echo none)" == v22.* ]]; then
   ok "Node 22 already installed ($(node -v))"
@@ -291,11 +292,15 @@ sudo apt-get install -y unclutter >/dev/null 2>&1 ||
 if ! command -v chromium-browser >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1; then
   sudo apt-get install -y chromium-browser || sudo apt-get install -y chromium || true
 fi
+# lame decodes and re-encodes every clip uploaded through the Admin Console
+# (scripts/normalize-sound.py). Without it uploads fail; the board still plays.
+command -v lame >/dev/null 2>&1 || run "lame installed" sudo apt-get install -y lame
 # shellcheck disable=SC2016  # deliberately evaluated inside the retried check
 verify "node 22" bash -c '[[ "$(node -v)" == v22.* ]]'
 verify "npm" command -v npm
 verify "git" command -v git
 verify "chromium" bash -c 'command -v chromium-browser || command -v chromium'
+verify "lame" command -v lame
 pause "Enter to join the tailnet"
 
 # ── 3 ─────────────────────────────────────────────────────────────────────
@@ -369,9 +374,28 @@ verify "funnel is serving port $PORT" \
 fi
 WEBHOOK_URL="https://$TS_HOST/webhook"
 ok "webhook URL will be: $WEBHOOK_URL"
-pause "Enter to set up the code"
+pause "Enter to set up the Admin Console"
 
 # ── 5 ─────────────────────────────────────────────────────────────────────
+stage "Admin Console — tailnet-only"
+say "The Admin Console changes themes, sounds, schedules and settings from a"
+say "browser. It listens on 127.0.0.1:$ADMIN_PORT only, so the funnel above can't"
+say "reach it. 'tailscale serve' (not funnel) puts it on port 8443 for devices"
+say "on your tailnet and nobody else."
+warn "Never funnel 8443 — anyone on the internet could then change the board."
+if tailscale serve status 2>/dev/null | grep -q "127.0.0.1:$ADMIN_PORT"; then
+  ok "already serving https://$TS_HOST:8443 → 127.0.0.1:$ADMIN_PORT"
+else
+  run "admin console served on the tailnet" \
+    sudo tailscale serve --bg --https=8443 "http://127.0.0.1:$ADMIN_PORT"
+fi
+verify "8443 is tailnet only (not funnelled)" \
+  bash -c "tailscale serve status | grep -q ':8443 (tailnet only)'"
+ok "Admin Console: https://$TS_HOST:8443"
+note "    open it from any device on the tailnet once the server is running"
+pause "Enter to set up the code"
+
+# ── 6 ─────────────────────────────────────────────────────────────────────
 stage "The repo"
 if git -C "$REPO_DIR" rev-parse --show-toplevel >/dev/null 2>&1; then
   ok "running from a checkout at $REPO_DIR"
@@ -431,7 +455,7 @@ fi
 ok "tracked repos: ${TRACKED_REPOS[*]}"
 pause "Enter to create the secrets file"
 
-# ── 6 ─────────────────────────────────────────────────────────────────────
+# ── 7 ─────────────────────────────────────────────────────────────────────
 stage "Secrets — $ENV_TARGET"
 say "Secrets live only in $ENV_TARGET (0600). Never in the repo."
 WEBHOOK_SECRET="$(_existing GITHUB_WEBHOOK_SECRET || true)"
@@ -492,7 +516,7 @@ if [[ -n "${POSTHOG_PERSONAL_API_KEY:-}" ]]; then
 fi
 pause "Enter to install the services"
 
-# ── 7 ─────────────────────────────────────────────────────────────────────
+# ── 8 ─────────────────────────────────────────────────────────────────────
 stage "systemd — server + kiosk"
 say "Installing the two units: the server (restarts on crash, starts at boot)"
 say "and the Chromium kiosk (starts with the desktop session)."
@@ -510,7 +534,7 @@ verify "the board is reachable through the funnel" \
   curl -sf -o /dev/null "https://$TS_HOST/"
 pause "Enter to register the webhooks"
 
-# ── 8 ─────────────────────────────────────────────────────────────────────
+# ── 9 ─────────────────────────────────────────────────────────────────────
 stage "GitHub webhooks — the Tracked Repos"
 say "Each Tracked Repo needs a webhook pointing at the Pi. Settings → Webhooks"
 say "→ Add webhook, with exactly these values:"
@@ -581,7 +605,7 @@ else
 fi
 pause "Enter for the end-to-end test"
 
-# ── 9 ─────────────────────────────────────────────────────────────────────
+# ── 10 ────────────────────────────────────────────────────────────────────
 stage "End-to-end test"
 say "Sending a signed 'PR merged' delivery through the public funnel URL,"
 say "exactly the way GitHub will. Watch the TV."

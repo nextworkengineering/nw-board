@@ -88,7 +88,8 @@ with the repo.
 Set the default with `"theme": "<name>"` in `config.json` and restart the server.
 It refuses to start on a name with no file.
 
-Switch from the machine running the server:
+Switch from the [Admin Console](#admin-console) (until midnight or permanently,
+with a button for each), or with `curl` from the machine running the server:
 
 ```sh
 curl -X POST 'http://127.0.0.1:3000/theme?name=neobrutal'            # wear it until local midnight
@@ -112,6 +113,50 @@ its values, and add it to `THEMES` in `public/themes/index.js`. Custom fonts go 
 `public/fonts/` with an `@font-face` in `public/fonts.css`, and in the Theme's
 `preload` list so they load before the board draws. `npm test` fails on a Theme
 missing a palette key or a field the client reads, or one left out of `THEMES`.
+
+## Admin Console
+
+A page for changing the board without SSH, at `https://<tailnet-host>:8443` from
+any device on the tailnet. From it you can:
+
+- switch the Theme until midnight or permanently, or clear a live switch;
+- upload mp3s into the Sound Library, preview or delete them, and assign a clip to
+  each sound slot (merge, approval, PR opened, the two Day Chimes, Target Hit);
+- schedule Reminders (a text banner, optional clip) and Scheduled Celebrations (a
+  takeover with your message, optional clip), one-off on a date or weekly;
+- edit Quiet Hours, Day Chime times and the names roster, live, no restart;
+- replay the Target Hit.
+
+Changes are written to `config.json`, so they survive restarts. Tracked Repos and
+the other keys still need an edit and a restart. Each write is logged with the
+Tailscale login that made it (`journalctl -u pr-arcade | grep admin:`).
+
+The console has its own listener on `127.0.0.1:${ADMIN_PORT:-3001}` and nothing
+else: the board's port 3000 serves none of it, so the Funnel can't reach it.
+`tailscale serve` puts it on the tailnet. `setup-wizard.sh` does this, or once by
+hand on the Pi:
+
+```sh
+sudo tailscale serve --bg --https=8443 http://127.0.0.1:3001
+tailscale serve status    # https://<host>:8443 (tailnet only)
+tailscale funnel status   # 8443 must not say "Funnel on"
+```
+
+**Never funnel 8443.** The console has no login of its own: the tailnet is the
+lock, and anyone who can reach it can change the board.
+
+Uploads are normalized on the Pi by `scripts/normalize-sound.py` (the same script
+as by hand, see below), which needs `lame` there (`sudo apt install lame`; the
+wizard and `install.sh` install it). Only mp3 is accepted, up to 10 MB and 30 s,
+named `a-z`, `0-9` and `-`. The clips land in `public/sounds/uploads/`, which is
+gitignored like `config.json`: they live only on the Pi, so back them up with it.
+Clips committed in `public/sounds/` can be assigned but not deleted.
+
+The console is tailnet-only, but what it sends the board is not: Reminder and
+Celebration text reaches the TV over port 3000's WebSocket, and uploaded clips are
+static files under `/sounds/uploads/`, so both are reachable through the Funnel.
+Don't put anything private in them, unless the Funnel is scoped to the webhook with
+`--set-path=/webhook` (see `deploy/README.md`).
 
 ## Configuration
 
@@ -140,7 +185,8 @@ Event sounds: the board plays `public/sounds/mustard.mp3` on a merge,
 is opened — all three are in git, so a deploy delivers them. The chimes are not:
 `public/sounds/oh-my-gosh.mp3` (start of day) and
 `public/sounds/super-mario-end.mp3` (end of day) have to be dropped in by hand on
-each machine. Without a file the board falls back to that event's 8-bit jingle.
+each machine, or uploaded through the [Admin Console](#admin-console) and assigned
+to the chime slots. Without a file the board falls back to that event's 8-bit jingle.
 Clips only play for people on the `names` map — a bot or an unmapped login gets
 the jingle, so adding a teammate to the map is what opts them in.
 

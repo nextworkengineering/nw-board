@@ -219,3 +219,52 @@ test("the takeover path is not throttled by the ambient cooldown", async () => {
 
   expect(clips).toEqual(["sounds/yo-pierre.mp3", "sounds/mustard.mp3"]);
 });
+
+// --------------------------------------------------------------------------------
+// The Admin Console's sounds: slot assignments from the snapshot, and the clips
+// a scheduled Reminder or Scheduled Celebration carries.
+// --------------------------------------------------------------------------------
+
+test("an assigned clip replaces its slot's default, and unassigning restores it", async () => {
+  const { player, clips } = ambientPlayer();
+
+  player.setSamples({ "pr-merged": "sounds/uploads/airhorn.mp3" });
+  await player.play("pr-merged");
+  await player.play("review-approved");
+  // The next snapshot no longer names pr-merged: back to the built-in clip.
+  player.setSamples({});
+  await player.play("pr-merged");
+
+  expect(clips).toEqual([
+    "sounds/uploads/airhorn.mp3",
+    "sounds/omg.mp3",
+    "sounds/mustard.mp3",
+  ]);
+});
+
+test("a scheduled clip plays from its own url", async () => {
+  const { player, clips, starts } = ambientPlayer();
+
+  await expect(player.playClip("sounds/uploads/standup.mp3", "day-chime")).resolves.toBe(
+    true,
+  );
+
+  expect(clips).toEqual(["sounds/uploads/standup.mp3"]);
+  expect(starts).toEqual([]);
+});
+
+test.for([
+  ["no clip chosen", null],
+  ["a clip that will not play", "sounds/uploads/deleted.mp3"],
+])("a scheduled message with %s falls back to the jingle", async ([, url]) => {
+  const { AudioContext, starts } = audioContext("suspended");
+  const Audio = vi.fn(function Audio() {
+    return { volume: 1, play: vi.fn().mockRejectedValue(new Error("404")) };
+  });
+  const player = createAudioPlayer({ AudioContext, Audio, warn: vi.fn() });
+
+  await expect(player.playClip(url, "day-chime")).resolves.toBe(true);
+
+  expect(Audio).toHaveBeenCalledTimes(url ? 1 : 0);
+  expect(starts.length).toBeGreaterThan(0);
+});

@@ -6,9 +6,12 @@ Every sound clip added to `public/sounds/` goes through
 `scripts/normalize-sound.py` before it ships:
 
 ```sh
-brew install lame   # once; macOS has no mp3 encoder, afconvert only decodes
+brew install lame   # once; lame both decodes and encodes (sudo apt install lame on the Pi)
 python3 scripts/normalize-sound.py ~/Downloads/foo.mp3 public/sounds/foo.mp3
 ```
+
+Clips uploaded through the Admin Console go through the same script automatically
+on the Pi, into `public/sounds/uploads/` (gitignored, Pi-only).
 
 It does two things every clip needs, in one pass from the original download so
 the result is only one mp3 generation from source: tops the leading silence up to

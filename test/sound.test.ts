@@ -147,15 +147,16 @@ async function watchClock(clock: number, next: number) {
 }
 
 test.for([
-  ["the start of the workday", at(THURSDAY, 8, 59, 55), at(THURSDAY, 9, 0), "09:00"],
-  ["the end of the workday", at(THURSDAY, 16, 59, 55), at(THURSDAY, 17, 0), "17:00"],
+  ["the start of the workday", at(THURSDAY, 8, 59, 55), at(THURSDAY, 9, 0), { at: "09:00", last: false }],
+  // The latest configured chime is flagged, so the board ends the day on it.
+  ["the end of the workday", at(THURSDAY, 16, 59, 55), at(THURSDAY, 17, 0), { at: "17:00", last: true }],
 ])(
   "the clock reaching %s on a weekday pushes exactly one Day Chime",
-  async ([, before, after, chimeAt]) => {
+  async ([, before, after, chime]) => {
     const received = await watchClock(before as number, after as number);
 
     // 200ms of 10ms ticks: a chime that fired per tick would show up many times over.
-    expect(received).toEqual([{ type: "day-chime", at: chimeAt }]);
+    expect(received).toEqual([{ type: "day-chime", ...(chime as object) }]);
   },
 );
 

@@ -1,0 +1,614 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PR Arcade Admin</title>
+<style>
+  :root {
+    --ink: #1B1918; --ink-2: #6C615C; --ink-3: #847770; --off: #B7ADA8;
+    --paper: #F8F5F1; --line: #E5DEDA; --line-2: #F0E9E6; --control: #CDC5C1;
+    --canary: #FFDD2D; --danger: #C93821; --warn: #C1520D; --dirty: #E9610D; --ok: #05967C;
+    --sans: "FK Grotesk Neue", Inter, system-ui, sans-serif;
+    --mono: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: #fff; color: var(--ink); font: 14px/20px var(--sans); -webkit-font-smoothing: antialiased; }
+  h1, h2, h3, p { margin: 0; }
+  .mono { font-family: var(--mono); }
+  .muted { color: var(--ink-2); }
+  .small { font-size: 12px; line-height: 16px; }
+
+  header { display: flex; justify-content: space-between; align-items: end; padding: 40px 48px 28px; border-bottom: 1px solid var(--ink); }
+  .brand { display: flex; gap: 16px; align-items: center; }
+  .mark { width: 40px; height: 40px; border-radius: 6px; background: var(--ink); display: grid; place-items: center; }
+  .mark::after { content: ""; width: 14px; height: 14px; border-radius: 2px; background: var(--canary); }
+  h1 { font-size: 28px; line-height: 32px; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 4px; }
+  .status { display: flex; gap: 8px; align-items: center; color: var(--ok); font: 12px/16px var(--mono); }
+  .status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .status.down { color: var(--danger); }
+
+  section { display: flex; gap: 48px; padding: 32px 48px; border-bottom: 1px solid var(--line); }
+  .rail { width: 208px; flex-shrink: 0; display: flex; flex-direction: column; gap: 6px; }
+  .rail .num { font: 12px/16px var(--mono); color: var(--ink-3); }
+  .rail h2 { font-size: 18px; line-height: 24px; font-weight: 600; }
+  .rail p { font-size: 13px; line-height: 18px; color: var(--ink-2); }
+  .content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 20px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+  button, .btn { font: 600 14px/20px var(--sans); height: 36px; padding: 0 14px; border-radius: 6px; border: 1px solid var(--control); background: #fff; color: var(--ink); cursor: pointer; display: inline-flex; align-items: center; gap: 8px; }
+  button.primary { background: var(--ink); border-color: var(--ink); color: #fff; }
+  button.link { border: 0; background: none; padding: 0 6px; font-weight: 500; text-decoration: underline; height: auto; }
+  button.link.danger, button.danger { color: var(--danger); }
+  button.danger { border-color: #F0B7AD; font-weight: 500; height: 30px; }
+  button:disabled { color: var(--off); border-color: var(--line); cursor: not-allowed; }
+  button.primary:disabled { background: var(--control); border-color: var(--control); color: #fff; }
+  button.icon { border: 0; background: none; padding: 0 6px; color: var(--ink-3); font-size: 18px; }
+  button.dashed { border-style: dashed; font-weight: 500; height: 32px; }
+  :focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+  .vr { width: 1px; height: 20px; background: var(--line); margin: 0 4px; }
+
+  input[type=text], input[type=time], input[type=date], select { font: 14px/20px var(--sans); height: 36px; padding: 0 12px; border: 1px solid var(--control); border-radius: 6px; background: #fff; color: var(--ink); }
+  input[type=time], input[type=date], select.mono, input.mono { font-family: var(--mono); }
+  input[type=radio], input[type=checkbox] { accent-color: var(--ink); }
+  label.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* Theme */
+  .themes { display: flex; gap: 12px; flex-wrap: wrap; }
+  .theme { width: 220px; padding: 14px; border: 2px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; gap: 12px; cursor: pointer; }
+  .theme:has(input:checked) { border-color: var(--ink); }
+  .theme .top { display: flex; gap: 10px; align-items: center; font-size: 15px; font-weight: 600; }
+  .theme .top span { flex: 1; }
+  .badge { background: var(--canary); border-radius: 4px; padding: 1px 6px; font-size: 11px; line-height: 16px; font-weight: 500; }
+  .swatch { display: flex; height: 28px; border-radius: 4px; overflow: hidden; background: var(--paper); }
+  .swatch i { flex: 1; } .swatch i:first-child { flex: 2; }
+  .swatch.boxed { border: 2px solid var(--ink); }
+
+  /* Tables */
+  table { width: 100%; border: 1px solid var(--line); border-radius: 8px; border-spacing: 0; overflow: hidden; }
+  th { background: var(--paper); text-align: left; font-weight: 500; font-size: 12px; line-height: 16px; color: var(--ink-2); padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  td { padding: 10px 16px; border-bottom: 1px solid var(--line-2); vertical-align: middle; }
+  tr:last-child td { border-bottom: 0; }
+  td.actions { text-align: right; white-space: nowrap; }
+  audio { height: 32px; width: 270px; display: block; }
+  .tag { display: inline-block; border-radius: 4px; padding: 1px 8px; font-size: 12px; line-height: 18px; }
+  .tag.builtin { background: var(--line-2); color: var(--ink-2); }
+  .tag.uploaded { background: #ECFDF7; color: #047866; }
+  .tag.reminder { background: #ECF5FD; color: #1161B2; }
+  .tag.celebration { background: #FFF7D0; color: #5B4C00; }
+  .inuse { color: var(--warn); }
+
+  .upload { display: flex; align-items: center; gap: 16px; padding: 18px 24px; border: 1px dashed var(--control); border-radius: 8px; }
+  .upload.over { background: var(--paper); border-color: var(--ink); }
+  .upload > div { flex: 1; }
+  .upload strong { font-weight: 600; }
+  pre.output { margin: 0; padding: 12px 16px; background: var(--paper); border-radius: 8px; font: 12px/18px var(--mono); white-space: pre-wrap; }
+  .slots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px 16px; }
+  .slots select { width: 100%; }
+
+  /* Schedule form */
+  form.schedule { background: var(--paper); border-radius: 8px; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+  form.schedule h3 { font-size: 14px; font-weight: 600; }
+  .seg { display: inline-flex; border: 1px solid var(--control); border-radius: 6px; padding: 3px; background: #fff; }
+  .seg label { padding: 4px 10px; border-radius: 4px; cursor: pointer; position: relative; }
+  .seg label:has(input:checked) { background: var(--ink); color: #fff; font-weight: 600; }
+  .seg label:has(input:focus-visible) { outline: 2px solid var(--ink); outline-offset: 1px; }
+  .seg input, .days input { position: absolute; opacity: 0; pointer-events: none; }
+  .days { display: flex; gap: 4px; }
+  .days label { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--control); border-radius: 4px; font: 12px var(--mono); color: var(--ink-3); background: #fff; cursor: pointer; position: relative; }
+  .days label:has(input:checked) { background: var(--ink); border-color: var(--ink); color: #fff; }
+  .days label:has(input:focus-visible) { outline: 2px solid var(--ink); outline-offset: 1px; }
+  .days[aria-disabled=true] { opacity: .4; }
+  fieldset { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; font-size: 13px; min-width: 0; }
+  legend { padding: 0; margin-bottom: 6px; }
+  .formrow { display: flex; gap: 16px; align-items: end; flex-wrap: wrap; }
+
+  /* Settings */
+  .cols { display: grid; grid-template-columns: 1fr 1fr 1.4fr; gap: 32px; }
+  .cols h3 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+  .cols .hint { color: var(--ink-2); font-size: 13px; line-height: 18px; margin-bottom: 12px; }
+  .list { display: flex; flex-direction: column; gap: 8px; align-items: start; }
+  .list .row { flex-wrap: nowrap; }
+  .eod { color: #7A5A00; font-size: 12px; min-width: 70px; }
+  .savebar { border-top: 1px solid var(--line); padding-top: 20px; }
+  .dirty { color: var(--ink-2); font-size: 12px; display: inline-flex; gap: 8px; align-items: center; }
+  .dirty::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--dirty); }
+
+  section.replay { background: var(--ink); color: #fff; border: 0; padding: 40px 48px; }
+  section.replay .rail h2 { color: #fff; }
+  .replay-btn { height: 48px; padding: 0 24px; font-size: 16px; font-weight: 700; background: var(--canary); border: 2px solid var(--canary); color: var(--ink); box-shadow: 0 0 0 3px rgba(255, 221, 45, .25); }
+  section.replay p { color: #B7ADA8; font-size: 12px; }
+
+  #toast { position: fixed; bottom: 24px; right: 24px; max-width: 480px; padding: 12px 16px; border-radius: 8px; background: var(--ink); color: #fff; font-size: 13px; white-space: pre-wrap; display: none; z-index: 10; }
+  #toast.show { display: block; }
+  #toast.error { background: var(--danger); }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <div class="mark" aria-hidden="true"></div>
+    <div>
+      <h1>PR Arcade Admin</h1>
+      <p class="muted" id="sub">Loading…</p>
+    </div>
+  </div>
+  <div class="status" id="status">connecting</div>
+</header>
+
+<main>
+  <section aria-labelledby="h-theme">
+    <div class="rail"><span class="num">01</span><h2 id="h-theme">Theme</h2><p>What the TV wears. A live theme overrides the default until midnight.</p></div>
+    <div class="content">
+      <div class="themes" id="themes" role="radiogroup" aria-labelledby="h-theme"></div>
+      <div class="row">
+        <button class="primary" id="wear">Wear until midnight</button>
+        <button id="make-default">Make default</button>
+        <span class="vr"></span>
+        <button class="link" id="clear-theme">Clear live theme</button>
+        <span class="small" style="color: var(--ink-3)" id="live-note"></span>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-sounds">
+    <div class="rail"><span class="num">02</span><h2 id="h-sounds">Sound Library</h2><p>Clips the board can play, and which clip each moment uses.</p></div>
+    <div class="content">
+      <table>
+        <thead><tr><th>Clip</th><th>Source</th><th>Preview</th><th><span class="sr">Actions</span></th></tr></thead>
+        <tbody id="library"></tbody>
+      </table>
+      <div class="upload" id="drop">
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M10 13V3m0 0L6 7m4-4 4 4M3 13v4h14v-4"/></svg>
+        <div>
+          <strong>Upload mp3 — normalized automatically</strong>
+          <p class="small muted">Drop a file or choose one, up to 30 s. Lead-in topped up to 250ms and loudness matched to the library before it's saved.</p>
+        </div>
+        <label class="btn" style="font-weight:500">Choose file…<input type="file" id="file" accept="audio/mpeg,.mp3" class="sr"></label>
+      </div>
+      <pre class="output" id="upload-output" hidden></pre>
+      <div>
+        <p style="margin-bottom:12px"><strong style="font-weight:600">Slots</strong> <span class="small muted">&nbsp;Pick “default” to fall back to the built-in clip.</span></p>
+        <div class="slots" id="slots"></div>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-schedules">
+    <div class="rail"><span class="num">03</span><h2 id="h-schedules">Schedules</h2><p>Reminders and celebrations the board takes over for, at a set time.</p></div>
+    <div class="content">
+      <table>
+        <thead><tr><th>Kind</th><th>Text</th><th>When</th><th>Clip</th><th><span class="sr">Actions</span></th></tr></thead>
+        <tbody id="schedules"></tbody>
+      </table>
+      <form class="schedule" id="schedule-form">
+        <h3 id="form-title">Add a schedule</h3>
+        <div class="formrow">
+          <fieldset><legend>Kind</legend>
+            <div class="seg">
+              <label><input type="radio" name="kind" value="reminder" checked>Reminder</label>
+              <label><input type="radio" name="kind" value="celebration">Celebration</label>
+            </div>
+          </fieldset>
+          <label class="field" style="flex:1">
+            <span class="row" style="justify-content:space-between">Text <span class="small mono" style="color:var(--ink-3)" id="count">0 / 120</span></span>
+            <input type="text" name="text" maxlength="120" required style="border-color:var(--ink)">
+          </label>
+        </div>
+        <div class="formrow">
+          <label class="field">Time<input type="time" name="time" required></label>
+          <fieldset><legend>Repeat</legend>
+            <div class="row" style="height:36px; gap:16px">
+              <label class="row" style="gap:6px"><input type="radio" name="repeat" value="once">One-off date</label>
+              <label class="row" style="gap:6px"><input type="radio" name="repeat" value="weekly" checked>Weekly</label>
+            </div>
+          </fieldset>
+          <label class="field" id="date-field" hidden>Date<input type="date" name="date"></label>
+          <fieldset id="days-field"><legend>Days</legend>
+            <div class="days" id="days" style="height:36px; align-items:center"></div>
+          </fieldset>
+          <label class="field" style="flex:1">Clip<select name="sound" class="mono" id="clip"></select></label>
+          <button type="button" id="cancel-edit" hidden>Cancel</button>
+          <button class="primary" type="submit" id="submit-schedule">Add</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-settings">
+    <div class="rail"><span class="num">04</span><h2 id="h-settings">Settings</h2><p>When the board may make noise, and what it calls people.</p></div>
+    <div class="content">
+      <div class="cols">
+        <div>
+          <h3>Quiet Hours</h3>
+          <p class="hint">Sound allowed on weekdays</p>
+          <div class="row">
+            <label class="row" style="gap:8px">from <input type="time" id="q-start"></label>
+            <label class="row" style="gap:8px">to <input type="time" id="q-end"></label>
+          </div>
+          <p class="small" style="color:var(--ink-3); margin-top:12px">Outside these hours, and all weekend, the board celebrates silently.</p>
+        </div>
+        <div>
+          <h3>Day Chimes</h3>
+          <p class="hint">The last one is the end-of-day chime.</p>
+          <div class="list" id="chimes"></div>
+        </div>
+        <div>
+          <h3>Names</h3>
+          <p class="hint">GitHub login → the first name the board shows.</p>
+          <div class="list" id="names"></div>
+        </div>
+      </div>
+      <div class="row savebar">
+        <button class="primary" id="save-settings">Save settings</button>
+        <span class="dirty" id="dirty" hidden></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="replay" aria-labelledby="h-replay">
+    <div class="rail"><span class="num">05</span><h2 id="h-replay">On the TV</h2></div>
+    <div class="content" style="flex-direction:row; align-items:center; gap:16px">
+      <button class="replay-btn" id="replay">▶&nbsp; Replay WAU Target Hit</button>
+      <div><strong style="font-weight:500">Plays on the TV now</strong><p>Full takeover with applause. Everyone in the room will hear it.</p></div>
+    </div>
+  </section>
+</main>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+const SLOTS = {
+  "pr-merged": "PR merged", "review-approved": "Review approved", "pr-opened": "PR opened",
+  "day-start": "Day start chime", "day-chime": "Day end chime", "wau-target-hit": "WAU target hit",
+};
+// What an unassigned slot plays: mirrors SAMPLES in public/audio.js.
+const BUILT_IN = {
+  "pr-merged": "mustard.mp3", "review-approved": "omg.mp3", "pr-opened": "yo-pierre.mp3",
+  "day-start": "oh-my-gosh.mp3", "day-chime": "super-mario-end.mp3", "wau-target-hit": "applause.mp3",
+};
+// Swatches for the Theme cards; a theme not listed here still shows, just without one.
+const LOOKS = {
+  kernel: { about: "Warm leather, brand kernel", colors: ["#1B1918", "#FFDD2D", "#11CCA6", "#E8624D"] },
+  arcade: { about: "Neon CRT · auto after WAU hit", colors: ["#0B0B1A", "#FFE066", "#66DDAA", "#FF7CE5"] },
+  neobrutal: { about: "Canary slab, hard shadows", colors: ["#FFDD2D", "#FFFFFF", "#1B1918", "#875BF7"], boxed: true },
+};
+// M..S on screen, JS getDay() values underneath (0 = Sunday).
+const WEEK = [[1, "M", "Monday"], [2, "T", "Tuesday"], [3, "W", "Wednesday"], [4, "T", "Thursday"], [5, "F", "Friday"], [6, "S", "Saturday"], [0, "S", "Sunday"]];
+const DAY = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+let state;
+let selectedTheme;
+let draft; // Settings being edited: survives re-renders until saved
+let editingId = null;
+
+function toast(message, error = false) {
+  const t = $("toast");
+  t.textContent = message;
+  t.className = `show${error ? " error" : ""}`;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => (t.className = ""), error ? 8000 : 3000);
+}
+
+async function api(method, path, body, type = "application/json") {
+  const res = await fetch(path, {
+    method,
+    headers: body === undefined ? {} : { "Content-Type": type },
+    body: body === undefined ? undefined : type === "application/json" ? JSON.stringify(body) : body,
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    let message = text;
+    try { message = JSON.parse(text).error ?? text; } catch {}
+    throw new Error(`${res.status} ${message || res.statusText}`);
+  }
+  return text ? JSON.parse(text) : null;
+}
+
+// Every write: send it, re-read the state, re-render. Undefined means it failed (and said so).
+async function write(method, path, body, done, type) {
+  try {
+    const result = await api(method, path, body, type);
+    await load();
+    toast(done);
+    return result ?? true;
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function load() {
+  try {
+    state = await api("GET", "/api/state");
+    $("status").textContent = `pi online · ${state.you ? "tailnet only" : "local"}`;
+    $("status").classList.remove("down");
+  } catch (error) {
+    $("status").textContent = "offline";
+    $("status").classList.add("down");
+    toast(`Could not load state: ${error.message}`, true);
+    return;
+  }
+  render();
+}
+
+// ---------- rendering ----------
+
+function render() {
+  const { theme } = state;
+  $("sub").textContent = `Board wearing: ${theme.current} · default: ${theme.default} · ` +
+    (state.you ? `signed in as ${state.you} via Tailscale` : "not signed in (opened without tailscale serve)");
+  renderTheme();
+  renderLibrary();
+  renderSlots();
+  renderSchedules();
+  if (!draft || !dirtyGroups().length) draft = settingsOf(state);
+  renderSettings();
+}
+
+function renderTheme() {
+  const { current, default: fallback, all } = state.theme;
+  if (!all.includes(selectedTheme)) selectedTheme = current;
+  $("themes").innerHTML = all.map((name) => {
+    const look = LOOKS[name];
+    const notes = [name === fallback && "Default", name === current && "wearing now"].filter(Boolean);
+    return `<label class="theme">
+      <span class="top"><input type="radio" name="theme" value="${esc(name)}" ${name === selectedTheme ? "checked" : ""}><span>${esc(name)}</span>${name === current ? '<b class="badge">ON TV</b>' : ""}</span>
+      ${look ? `<span class="swatch${look.boxed ? " boxed" : ""}" aria-hidden="true">${look.colors.map((c) => `<i style="background:${c}"></i>`).join("")}</span>` : ""}
+      <span class="small muted">${esc(notes.join(" · ") || look?.about || "")}</span>
+    </label>`;
+  }).join("");
+  const live = current !== fallback;
+  $("clear-theme").disabled = !live;
+  $("live-note").textContent = live ? `Live: ${current} until midnight` : "No live theme set";
+}
+
+function usersOf(path) {
+  const slots = Object.keys(SLOTS).filter((slot) => (state.sounds.slots[slot] ?? BUILT_IN[slot]) === path).map((slot) => SLOTS[slot]);
+  const n = state.schedules.filter((s) => s.sound === path).length;
+  return [slots.join(", "), n && `${n} schedule${n > 1 ? "s" : ""}`].filter(Boolean).join(" + ");
+}
+
+function renderLibrary() {
+  $("library").innerHTML = state.sounds.library.map((path) => {
+    const uploaded = path.startsWith("uploads/");
+    const users = usersOf(path);
+    const used = !users ? '<span class="small muted">Not in use</span>'
+      : uploaded ? `<span class="small inuse">In use by ${esc(users)} — reassign before deleting</span>`
+      : `<span class="small muted">Used by ${esc(users)}</span>`;
+    return `<tr>
+      <td><div class="mono">${esc(path)}</div>${used}</td>
+      <td><span class="tag ${uploaded ? "uploaded" : "builtin"}">${uploaded ? "uploaded" : "built-in"}</span></td>
+      <td><audio controls preload="none" src="/sounds/${esc(path)}" aria-label="Preview ${esc(path)}"></audio></td>
+      <td class="actions">${uploaded ? `<button class="danger" data-delete-sound="${esc(path)}" ${users ? "disabled" : ""} aria-label="Delete ${esc(path)}">Delete</button>` : ""}</td>
+    </tr>`;
+  }).join("");
+}
+
+const clipOptions = (selected) => `<option value="">default</option>` +
+  state.sounds.library.map((p) => `<option value="${esc(p)}" ${p === selected ? "selected" : ""}>${esc(p)}</option>`).join("");
+
+function renderSlots() {
+  $("slots").innerHTML = Object.entries(SLOTS).map(([slot, label]) =>
+    `<label class="field">${label}<select class="mono" data-slot="${slot}">${clipOptions(state.sounds.slots[slot] ?? null)}</select></label>`
+  ).join("");
+  const clip = $("clip").value;
+  // No selected attribute here, so form.reset() goes back to "default"
+  $("clip").innerHTML = clipOptions(null);
+  $("clip").value = state.sounds.library.includes(clip) ? clip : "";
+}
+
+function when(s) {
+  if (s.date) {
+    const [y, m, d] = s.date.split("-").map(Number);
+    const day = new Date(y, m - 1, d).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+    return `${day.replace(",", "")} ${s.time}`;
+  }
+  const days = [...s.days].sort((a, b) => ((a + 6) % 7) - ((b + 6) % 7)); // Monday first
+  const key = [...s.days].sort().join("");
+  const name = key === "12345" ? "Weekdays" : key === "06" ? "Weekends" : key === "0123456" ? "Every day"
+    : days.length === 1 ? `${["Sundays", "Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays"][days[0]]}`
+    : days.map((d) => DAY[d]).join(", ");
+  return `${name} ${s.time}`;
+}
+
+function renderSchedules() {
+  $("schedules").innerHTML = state.schedules.length ? state.schedules.map((s) => `<tr>
+      <td><span class="tag ${s.kind}">${s.kind === "reminder" ? "Reminder" : "Celebration"}</span></td>
+      <td>${esc(s.text)}</td>
+      <td class="mono">${esc(when(s))}</td>
+      <td class="mono" ${s.sound ? "" : 'style="color:var(--ink-3)"'}>${esc(s.sound ?? "default")}</td>
+      <td class="actions"><button class="link" data-edit="${esc(s.id)}">Edit</button> <button class="link danger" data-delete-schedule="${esc(s.id)}">Delete</button></td>
+    </tr>`).join("")
+    : `<tr><td colspan="5" class="muted">No schedules yet.</td></tr>`;
+}
+
+// ---------- settings ----------
+
+const settingsOf = (s) => ({ quietHours: { ...s.quietHours }, chimes: [...s.chimes], names: Object.entries(s.names) });
+
+function payload() {
+  return {
+    quietHours: draft.quietHours,
+    chimes: draft.chimes.filter(Boolean).sort(),
+    names: Object.fromEntries(draft.names.filter(([login]) => login.trim()).map(([l, f]) => [l.trim(), f.trim()])),
+  };
+}
+
+function dirtyGroups() {
+  const now = payload();
+  const saved = { quietHours: state.quietHours, chimes: [...state.chimes].sort(), names: state.names };
+  return [["quietHours", "Quiet Hours"], ["chimes", "Day Chimes"], ["names", "Names"]]
+    .filter(([key]) => JSON.stringify(now[key]) !== JSON.stringify(saved[key])).map(([, label]) => label);
+}
+
+function showDirty() {
+  const groups = dirtyGroups();
+  $("dirty").hidden = !groups.length;
+  $("dirty").textContent = `Unsaved changes · ${groups.join(", ")}`;
+}
+
+function renderSettings() {
+  $("q-start").value = draft.quietHours.soundStart;
+  $("q-end").value = draft.quietHours.soundEnd;
+  const last = draft.chimes.filter(Boolean).sort().at(-1);
+  $("chimes").innerHTML = draft.chimes.map((t, i) => `<div class="row">
+      <input type="time" value="${esc(t)}" data-chime="${i}" aria-label="Chime ${i + 1}">
+      <span class="eod">${t && t === last ? "end of day" : ""}</span>
+      <button class="icon" data-remove-chime="${i}" aria-label="Remove chime ${esc(t)}">×</button>
+    </div>`).join("") + `<button class="dashed" id="add-chime">+ Add chime</button>`;
+  $("names").innerHTML = draft.names.map(([login, first], i) => `<div class="row">
+      <input type="text" class="mono" value="${esc(login)}" data-name="${i}" data-part="0" aria-label="GitHub login" placeholder="github-login" style="width:140px">
+      <span aria-hidden="true">→</span>
+      <input type="text" value="${esc(first)}" data-name="${i}" data-part="1" aria-label="First name for ${esc(login)}" placeholder="First name" style="width:160px">
+      <button class="icon" data-remove-name="${i}" aria-label="Remove ${esc(login)}">×</button>
+    </div>`).join("") + `<button class="dashed" id="add-name">+ Add person</button>`;
+  showDirty();
+}
+
+$("q-start").addEventListener("input", (e) => { draft.quietHours.soundStart = e.target.value; showDirty(); });
+$("q-end").addEventListener("input", (e) => { draft.quietHours.soundEnd = e.target.value; showDirty(); });
+$("chimes").addEventListener("input", (e) => {
+  draft.chimes[e.target.dataset.chime] = e.target.value;
+  const last = draft.chimes.filter(Boolean).sort().at(-1);
+  $("chimes").querySelectorAll(".eod").forEach((span, i) => (span.textContent = draft.chimes[i] && draft.chimes[i] === last ? "end of day" : ""));
+  showDirty();
+});
+$("chimes").addEventListener("click", (e) => {
+  if (e.target.id === "add-chime") draft.chimes.push("");
+  else if (e.target.dataset.removeChime) draft.chimes.splice(Number(e.target.dataset.removeChime), 1);
+  else return;
+  renderSettings();
+});
+$("names").addEventListener("input", (e) => {
+  draft.names[e.target.dataset.name][e.target.dataset.part] = e.target.value;
+  showDirty();
+});
+$("names").addEventListener("click", (e) => {
+  if (e.target.id === "add-name") draft.names.push(["", ""]);
+  else if (e.target.dataset.removeName) draft.names.splice(Number(e.target.dataset.removeName), 1);
+  else return;
+  renderSettings();
+});
+$("save-settings").addEventListener("click", async () => {
+  await write("PUT", "/api/settings", payload(), "Settings saved"); // render() resets the draft once it matches
+});
+
+// ---------- theme ----------
+
+$("themes").addEventListener("change", (e) => (selectedTheme = e.target.value));
+$("wear").addEventListener("click", () => write("POST", "/api/theme", { name: selectedTheme }, `TV wears ${selectedTheme} until midnight`));
+$("make-default").addEventListener("click", () => write("POST", "/api/theme", { name: selectedTheme, permanent: true }, `${selectedTheme} is now the default`));
+$("clear-theme").addEventListener("click", () => write("DELETE", "/api/theme", undefined, "Live theme cleared"));
+
+// ---------- sounds ----------
+
+$("library").addEventListener("click", (e) => {
+  const path = e.target.dataset.deleteSound;
+  if (path && confirm(`Delete ${path}?`)) write("DELETE", `/api/sounds/${path}`, undefined, `Deleted ${path}`);
+});
+$("slots").addEventListener("change", (e) => {
+  const slot = e.target.dataset.slot;
+  write("PUT", "/api/sound-slots", { [slot]: e.target.value || null }, `${SLOTS[slot]} → ${e.target.value || "default"}`);
+});
+
+async function upload(file) {
+  if (!file) return;
+  // The library only takes lowercase-dash names, so derive one from the file's.
+  const base = file.name.toLowerCase().replace(/\.mp3$/, "").replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+  const name = `${base || "upload"}.mp3`;
+  const out = $("upload-output");
+  out.hidden = false;
+  out.textContent = `Uploading ${file.name} as uploads/${name} and normalizing…`;
+  const result = await write("POST", `/api/sounds?name=${encodeURIComponent(name)}`, file, `Uploaded uploads/${name}`, "audio/mpeg");
+  out.textContent = result ? `${result.path ?? `uploads/${name}`}\n${result.output ?? ""}` : `Upload of ${file.name} failed — see the message.`;
+  $("file").value = "";
+}
+$("file").addEventListener("change", (e) => upload(e.target.files[0]));
+const drop = $("drop");
+drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); upload(e.dataTransfer.files[0]); });
+
+// ---------- schedules ----------
+
+const form = $("schedule-form");
+$("days").innerHTML = WEEK.map(([value, letter, name]) =>
+  `<label><input type="checkbox" name="days" value="${value}" ${value >= 1 && value <= 5 ? "checked" : ""} aria-label="${name}">${letter}</label>`).join("");
+
+function syncForm() {
+  const once = form.repeat.value === "once";
+  $("date-field").hidden = !once;
+  form.date.required = once;
+  $("days-field").hidden = once;
+  $("count").textContent = `${form.text.value.length} / 120`;
+}
+form.addEventListener("input", syncForm);
+
+function resetForm() {
+  editingId = null;
+  form.reset();
+  $("form-title").textContent = "Add a schedule";
+  $("submit-schedule").textContent = "Add";
+  $("cancel-edit").hidden = true;
+  syncForm();
+}
+$("cancel-edit").addEventListener("click", resetForm);
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const once = form.repeat.value === "once";
+  const days = [...form.querySelectorAll("input[name=days]:checked")].map((box) => Number(box.value));
+  if (!once && !days.length) return toast("Pick at least one day", true);
+  const item = {
+    id: editingId ?? `s${Date.now().toString(36)}`,
+    kind: form.kind.value,
+    text: form.text.value.trim(),
+    sound: form.sound.value || null,
+    time: form.time.value,
+    ...(once ? { date: form.date.value } : { days }),
+  };
+  const list = editingId ? state.schedules.map((s) => (s.id === editingId ? item : s)) : [...state.schedules, item];
+  if (await write("PUT", "/api/schedules", list, editingId ? "Schedule saved" : "Schedule added")) resetForm();
+});
+
+$("schedules").addEventListener("click", (e) => {
+  const { edit, deleteSchedule } = e.target.dataset;
+  if (deleteSchedule) {
+    const s = state.schedules.find((x) => x.id === deleteSchedule);
+    if (confirm(`Delete “${s.text}”?`))
+      write("PUT", "/api/schedules", state.schedules.filter((x) => x.id !== deleteSchedule), "Schedule deleted")
+        .then((ok) => ok && editingId === deleteSchedule && resetForm());
+  }
+  if (edit) {
+    const s = state.schedules.find((x) => x.id === edit);
+    editingId = s.id;
+    form.kind.value = s.kind;
+    form.text.value = s.text;
+    form.time.value = s.time;
+    form.repeat.value = s.date ? "once" : "weekly";
+    form.date.value = s.date ?? "";
+    for (const box of form.querySelectorAll("input[name=days]")) box.checked = (s.days ?? []).includes(Number(box.value));
+    form.sound.value = s.sound ?? "";
+    $("form-title").textContent = "Edit schedule";
+    $("submit-schedule").textContent = "Save";
+    $("cancel-edit").hidden = false;
+    syncForm();
+    form.scrollIntoView({ behavior: "smooth", block: "center" });
+    form.text.focus({ preventScroll: true });
+  }
+});
+
+// ---------- replay ----------
+
+$("replay").addEventListener("click", () => write("POST", "/api/wau-target-hit", {}, "Playing on the TV now"));
+
+syncForm();
+load();
+</script>
+</body>
+</html>

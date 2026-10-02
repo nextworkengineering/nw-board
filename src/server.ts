@@ -1,8 +1,21 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import {
+  existsSync,
+  linkSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import express, { type ErrorRequestHandler, type RequestHandler } from "express";
 import { WebSocketServer } from "ws";
 
@@ -82,12 +95,80 @@ const CELEBRATIONS = new Set(["pr-merged", "review-approved"]);
  */
 const SOUNDED = new Set([...CELEBRATIONS, "pr-opened"]);
 
+/**
+ * A complaint about config, whether it came from config.json at boot or from an
+ * Admin Console write. The status is what the admin API answers with; at boot it
+ * is ignored and the server simply refuses to start.
+ */
+const invalid = (complaint: string) => Object.assign(new Error(complaint), { status: 400 });
+
 /** "09:00" -> 540 minutes past local midnight. Anything else is a config error. */
 function minutesOfDay(value: unknown, complaint: string) {
-  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(value));
-  if (!match) throw new Error(complaint);
+  // A string check, not String(value): ["09:00"] would otherwise pass and be saved.
+  const match = typeof value === "string" && /^([01]\d|2[0-3]):([0-5]\d)$/.exec(value);
+  if (!match) throw invalid(complaint);
   return Number(match[1]) * 60 + Number(match[2]);
 }
+
+// The live-editable settings, checked identically at boot and on PUT /api/settings,
+// so nothing the Admin Console saves can stop the next boot.
+
+/** Quiet Hours: sound is allowed on weekdays between these two local times only. */
+function parseQuietHours(value: any) {
+  const complaint = `quietHours must be {"soundStart":"HH:MM","soundEnd":"HH:MM"}`;
+  minutesOfDay(value?.soundStart, complaint);
+  minutesOfDay(value?.soundEnd, complaint);
+  return { soundStart: value.soundStart as string, soundEnd: value.soundEnd as string };
+}
+
+/** Day Chimes: local times, weekdays only. */
+function parseChimes(value: unknown) {
+  const complaint = `chimes must be a list of "HH:MM"`;
+  if (!Array.isArray(value)) throw invalid(complaint);
+  for (const chime of value) minutesOfDay(chime, complaint);
+  return value as string[];
+}
+
+/**
+ * Team member names: GitHub login -> first name shown on the board. Optional;
+ * an unmapped login displays as-is, so absence is a cosmetic gap, not an error.
+ */
+function parseNames(value: unknown = {}) {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw invalid(`names must be {"<login>": "<first name>"}`);
+  for (const [key, name] of Object.entries(value))
+    if (typeof name !== "string") throw invalid(`names.${key} must be a string`);
+  return value as Record<string, string>;
+}
+
+/**
+ * The slots a clip can be assigned to — the board's SAMPLES keys in public/audio.js.
+ * An unassigned slot plays the client's built-in default.
+ */
+const SLOTS = [
+  "pr-merged",
+  "review-approved",
+  "pr-opened",
+  "day-start",
+  "day-chime",
+  "wau-target-hit",
+];
+
+/** A Sound Library file name. The pattern is also what keeps a name inside its directory. */
+const SOUND_NAME = /^[a-z0-9-]+\.mp3$/;
+
+/** "YYYY-MM-DD" of `at` in local time — what a one-off schedule's date is compared with. */
+const localDate = (at: Date) =>
+  `${at.getFullYear()}-${`${at.getMonth() + 1}`.padStart(2, "0")}-${`${at.getDate()}`.padStart(2, "0")}`;
+
+type Schedule = {
+  id: string;
+  kind: "reminder" | "celebration";
+  text: string;
+  /** A Sound Library path, e.g. "uploads/gong.mp3"; null plays the board's fallback jingle. */
+  sound: string | null;
+  time: string;
+} & ({ date: string } | { days: number[] });
 
 type Options = {
   /** Path to the JSON config holding the Tracked Repo list. */
@@ -105,7 +186,22 @@ type Options = {
   posthogApiBase?: string;
   /** How long the WAU dashboard proxy waits for PostHog's cached read. */
   posthogTimeoutMs?: number;
+  /** The Admin Console's loopback-only port; 0 picks a free one. */
+  adminPort?: number;
+  /** The Sound Library root (built-ins, plus uploads/); tests point this at a temp dir. */
+  soundsDir?: string;
+  /** Normalize an uploaded clip from src into dest, resolving to what it printed. */
+  normalize?: (src: string, dest: string) => Promise<string>;
 };
+
+const NORMALIZER = fileURLToPath(new URL("../scripts/normalize-sound.py", import.meta.url));
+/** scripts/normalize-sound.py, the one door every clip on the board goes through. */
+async function normalizeSound(src: string, dest: string) {
+  const { stdout, stderr } = await promisify(execFile)("python3", [NORMALIZER, src, dest], {
+    timeout: 120_000,
+  });
+  return stdout + stderr;
+}
 
 /** Monday 00:00 local time of the week containing `at` — the dedup window. */
 function startOfWeek(at: number) {
@@ -211,12 +307,17 @@ export async function startServer(port: number, options: Options = {}) {
   if (!Array.isArray(trackedRepos))
     throw new Error(`${configPath}: trackedRepos must be a list of "owner/name"`);
 
-  // Team member names: GitHub login -> first name shown on the board. Optional;
-  // an unmapped login displays as-is, so absence is a cosmetic gap, not an error.
-  const names: Record<string, string> = config.names ?? {};
-  for (const [key, value] of Object.entries(names))
-    if (typeof value !== "string")
-      throw new Error(`${configPath}: names.${key} must be a string`);
+  /** Run a settings check at boot, naming the file in its complaint. */
+  const fromConfig = <T>(parse: () => T) => {
+    try {
+      return parse();
+    } catch (error) {
+      throw new Error(`${configPath}: ${(error as Error).message}`);
+    }
+  };
+
+  // Live-editable from the Admin Console, hence `let`: every reader goes through these.
+  let names = fromConfig(() => parseNames(config.names));
 
   // The dev deploy workflow, as its file name (e.g. "env-dev.yaml"). Optional: with
   // no workflow configured the board simply never names a dev deployer.
@@ -241,15 +342,107 @@ export async function startServer(port: number, options: Options = {}) {
       throw new Error(complaint);
   }
 
-  // Quiet Hours: sound is allowed on weekdays between these two local times only.
-  const quietHours = `${configPath}: quietHours must be {"soundStart":"HH:MM","soundEnd":"HH:MM"}`;
-  const soundStart = minutesOfDay(config.quietHours?.soundStart, quietHours);
-  const soundEnd = minutesOfDay(config.quietHours?.soundEnd, quietHours);
-  // Day Chimes: local times, weekdays only.
-  const badChimes = `${configPath}: chimes must be a list of "HH:MM"`;
-  if (!Array.isArray(config.chimes)) throw new Error(badChimes);
-  const chimes: string[] = config.chimes;
-  for (const chime of chimes) minutesOfDay(chime, badChimes);
+  let quietHours = fromConfig(() => parseQuietHours(config.quietHours));
+  let chimes = fromConfig(() => parseChimes(config.chimes));
+
+  // The Sound Library: the committed clips in public/sounds/ (read-only) plus what the
+  // Admin Console uploaded into public/sounds/uploads/ (gitignored, deletable). A path
+  // is relative to public/sounds/, which is also where the board fetches it from.
+  const soundsDir =
+    options.soundsDir ?? fileURLToPath(new URL("../public/sounds", import.meta.url));
+  const uploadsDir = join(soundsDir, "uploads");
+  const mp3sIn = (dir: string) => {
+    try {
+      return readdirSync(dir).filter((file) => SOUND_NAME.test(file));
+    } catch {
+      return []; // no uploads/ until the first upload
+    }
+  };
+  const library = () => [
+    ...mp3sIn(soundsDir),
+    ...mp3sIn(uploadsDir).map((file) => `uploads/${file}`),
+  ];
+  // An allow-list read off the disk, so no path can name anything outside it.
+  const inLibrary = (path: unknown) => typeof path === "string" && library().includes(path);
+
+  // At boot (`boot` true) a path missing from the disk — a clip deleted by hand while
+  // assigned — only warns and is dropped: a throw there would be a systemd restart loop.
+  // An Admin Console write still 400s on it, so a typo never gets saved.
+  const missing = (boot: boolean, path: unknown, complaint: string) => {
+    if (!boot || typeof path !== "string") throw invalid(complaint);
+    console.warn(`${configPath}: ${complaint}, ignoring it`);
+  };
+
+  /** slot -> library path. Every value is checked against the disk, so a typo 400s. */
+  const parseSlots = (value: unknown, boot = false) => {
+    if (typeof value !== "object" || value === null || Array.isArray(value))
+      throw invalid(`sounds must be {"<slot>": "<library path>"}`);
+    const slots: Record<string, string | null> = {};
+    for (const [slot, path] of Object.entries(value)) {
+      if (!SLOTS.includes(slot)) throw invalid(`sounds: ${slot} is not one of ${SLOTS.join(", ")}`);
+      if (path !== null && !inLibrary(path))
+        missing(boot, path, `sounds.${slot}: ${path} is not in the Sound Library`);
+      else slots[slot] = path;
+    }
+    return slots;
+  };
+
+  // Every tick scans the whole list and every save logs it, so keep it a list a person
+  // could have typed. Only a hand-edit can exceed it at boot, which keeps the first 100.
+  const MAX_SCHEDULES = 100;
+
+  /** Reminders and Scheduled Celebrations, normalized to exactly the fields the board uses. */
+  const parseSchedules = (value: unknown, boot = false): Schedule[] => {
+    if (!Array.isArray(value)) throw invalid("schedules must be a list");
+    if (value.length > MAX_SCHEDULES) {
+      if (!boot) throw invalid(`at most ${MAX_SCHEDULES} schedules`);
+      console.warn(`${configPath}: more than ${MAX_SCHEDULES} schedules, keeping the first ${MAX_SCHEDULES}`);
+      value = value.slice(0, MAX_SCHEDULES);
+    }
+    const ids = new Set<string>();
+    return (value as unknown[]).map((item: any, index): Schedule => {
+      const bad = (complaint: string) => invalid(`schedules[${index}]: ${complaint}`);
+      if (typeof item !== "object" || item === null) throw bad("must be an object");
+      let { id, kind, text, sound = null, time, date, days } = item;
+      if (typeof id !== "string" || !id || ids.has(id)) throw bad("id must be a unique non-empty string");
+      ids.add(id);
+      if (kind !== "reminder" && kind !== "celebration")
+        throw bad(`kind must be "reminder" or "celebration"`);
+      if (typeof text !== "string" || !text.trim() || text.length > 120)
+        throw bad("text must be 1-120 characters");
+      if (sound !== null && !inLibrary(sound)) {
+        missing(boot, sound, `schedules[${index}]: ${sound} is not in the Sound Library`);
+        sound = null;
+      }
+      minutesOfDay(time, `schedules[${index}]: time must be "HH:MM"`);
+      const base = { id, kind, text, sound, time };
+      if ((date === undefined) === (days === undefined))
+        throw bad("needs exactly one of date (one-off) or days (weekly)");
+      if (date !== undefined) {
+        if (typeof date !== "string" || !/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(date))
+          throw bad(`date must be "YYYY-MM-DD"`);
+        return { ...base, date };
+      }
+      if (
+        !Array.isArray(days) ||
+        !days.length ||
+        new Set(days).size !== days.length ||
+        !days.every((day) => Number.isInteger(day) && day >= 0 && day <= 6)
+      )
+        throw bad("days must be distinct weekdays 0 (Sunday) to 6");
+      return { ...base, days };
+    });
+  };
+
+  // Optional, since existing Pi configs predate the Admin Console. Checked at boot like
+  // the rest, except that a hand-deleted clip still assigned somewhere only warns.
+  const assigned = (slots: Record<string, string | null>) =>
+    Object.fromEntries(Object.entries(slots).filter(([, path]) => path !== null)) as Record<
+      string,
+      string
+    >;
+  let soundSlots = assigned(fromConfig(() => parseSlots(config.sounds ?? {}, true)));
+  let schedules = fromConfig(() => parseSchedules(config.schedules ?? [], true));
 
   // The Theme the board wears when nothing live overrides it. Optional: existing Pi
   // installs keep config.json across deploys, and they wore kernel before this key.
@@ -263,7 +456,11 @@ export async function startServer(port: number, options: Options = {}) {
   const soundAllowed = () => {
     const at = new Date(now());
     const minute = at.getHours() * 60 + at.getMinutes();
-    return isWeekday(at) && minute >= soundStart && minute < soundEnd;
+    return (
+      isWeekday(at) &&
+      minute >= minutesOfDay(quietHours.soundStart, "") &&
+      minute < minutesOfDay(quietHours.soundEnd, "")
+    );
   };
 
   // The Feed: every tracked domain event from the last 24 hours, oldest first.
@@ -335,15 +532,19 @@ export async function startServer(port: number, options: Options = {}) {
     // cannot age out. Undateable is unshowable, so drop it.
     if (!Number.isFinite(at)) return null;
     // Display names live here, the one path into state: mutating the caller's
-    // event on purpose so the broadcast that follows carries the name too.
-    event.actor = names[event.actor] ?? event.actor;
+    // event on purpose so the broadcast that follows carries the name too. hasOwn, so
+    // a login like "constructor" is not read off Object.prototype.
+    const who = event.actor;
+    event.actor = Object.hasOwn(names, who) ? names[who]! : who;
     rollDedupWeek(); // roll the week over before deduping
     // An approval dedups per actor: two people approving the same PR are two
     // Celebration Events, and keying by PR alone swallowed the second one for the
     // rest of the week. The other types stay keyed by PR — Backfill credits a merge
     // to the author (the list API carries no merged_by) where the webhook credits
     // the merger, so keying pr-merged by actor would let one merge through twice.
-    const perActor = event.type === "review-approved" ? `/${event.actor}` : "";
+    // Keyed by login, not display name: names are live-editable, and a rename must not
+    // let a redelivered approval celebrate twice.
+    const perActor = event.type === "review-approved" ? `/${who}` : "";
     const key = `${event.type}/${event.repo}/${event.number}${perActor}`;
     if (BACKFILLED.has(event.type)) {
       if (seen.has(key)) return null;
@@ -567,8 +768,35 @@ export async function startServer(port: number, options: Options = {}) {
     else next();
   };
 
-  // Replays the Target Hit on demand.
-  app.post("/wau-target-hit", piOnly, (_req, res) => {
+  /**
+   * Every config write — a permanent Theme, an Admin Console save — goes through here.
+   * Re-read rather than reuse `config`: the operator may have edited the file since
+   * boot. Write-then-rename so a crash mid-write leaves the old file whole. All sync,
+   * so two writes in flight cannot interleave and lose each other's keys.
+   */
+  const saveConfig = (patch: Record<string, unknown>) => {
+    const onDisk = JSON.parse(readFileSync(configPath, "utf8"));
+    writeFileSync(`${configPath}.tmp`, JSON.stringify({ ...onDisk, ...patch }, null, 2) + "\n");
+    renameSync(`${configPath}.tmp`, configPath);
+  };
+
+  /** Wear `name` until local midnight, or make it config.theme for good. Throws if the save fails. */
+  const setTheme = (name: string, permanent: boolean) => {
+    if (permanent) {
+      saveConfig({ theme: name });
+      defaultTheme = name;
+      // A permanent switch counts as the last write, so it beats any live override.
+      live = null;
+    } else wearUntilMidnight(name);
+    broadcast(snapshot());
+  };
+  const clearTheme = () => {
+    live = null;
+    broadcast(snapshot());
+  };
+
+  /** Replays the Target Hit on demand, with the last WAU numbers read. */
+  const replayTargetHit = () => {
     wearUntilMidnight("arcade");
     broadcast({
       type: "wau-target-hit",
@@ -577,6 +805,10 @@ export async function startServer(port: number, options: Options = {}) {
       targetWau: lastWau?.targetWau,
       targetPercent: lastWau?.targetPercent,
     });
+  };
+
+  app.post("/wau-target-hit", piOnly, (_req, res) => {
+    replayTargetHit();
     res.sendStatus(204);
   });
 
@@ -593,28 +825,17 @@ export async function startServer(port: number, options: Options = {}) {
       res.sendStatus(404);
       return;
     }
-    if ("permanent" in req.query) {
-      // Re-read rather than reuse `config`: the operator may have edited the file since
-      // boot. Write-then-rename so a crash mid-write leaves the old file whole.
-      try {
-        const onDisk = JSON.parse(readFileSync(configPath, "utf8"));
-        onDisk.theme = name;
-        writeFileSync(`${configPath}.tmp`, JSON.stringify(onDisk, null, 2) + "\n");
-        renameSync(`${configPath}.tmp`, configPath);
-      } catch (error) {
-        console.warn(`Could not save theme to ${configPath}: ${error}`);
-        res.sendStatus(500);
-        return;
-      }
-      defaultTheme = name;
-      live = null;
-    } else wearUntilMidnight(name);
-    broadcast(snapshot());
+    try {
+      setTheme(name, "permanent" in req.query);
+    } catch (error) {
+      console.warn(`Could not save theme to ${configPath}: ${error}`);
+      res.sendStatus(500);
+      return;
+    }
     res.sendStatus(204);
   });
   app.delete("/theme", piOnly, (_req, res) => {
-    live = null;
-    broadcast(snapshot());
+    clearTheme();
     res.sendStatus(204);
   });
 
@@ -627,7 +848,7 @@ export async function startServer(port: number, options: Options = {}) {
   //                "openPrs":[{repo, number, title, actor}, ...],
   //                "mvp":{"names":[<string>, ...],"count":<number>}|null,
   //                "devDeploy":{"actor":<string>,"at":<ms>,"repo":<string>,"run":<number>}|null,
-  //                "theme":<string>}
+  //                "theme":<string>, "sounds":{"<slot>":"sounds/<path>.mp3", ...}}
   //               feed is oldest first and holds the last 24h, each entry stamped with
   //               the server time it happened; openPrs is the current set of open PRs
   //               (state, so no 24h expiry) — what's in flight now, each with the
@@ -638,7 +859,11 @@ export async function startServer(port: number, options: Options = {}) {
   //               "arcade" from a Target Hit or whatever a loopback POST /theme?name=
   //               set, until local midnight (when a fresh snapshot carries it off) or a
   //               DELETE /theme. POST /theme?name=<name>&permanent rewrites config.theme
-  //               itself. Each change is pushed as a fresh snapshot.
+  //               itself (the Admin Console's /api/theme does the same); sounds maps
+  //               each slot (a SAMPLES key in public/audio.js) the Admin Console has
+  //               assigned to a Sound Library clip, so the board plays it instead of the
+  //               slot's default — an unassigned slot is absent. Each change is pushed as
+  //               a fresh snapshot.
   //   live:       <domain event> = {"type":"pr-merged"|..., repo, number, title, actor}
   //               actor is the GitHub login of whoever did it (the merger for a
   //               pr-merged, the reviewer for a review, the commenter for a comment),
@@ -649,12 +874,21 @@ export async function startServer(port: number, options: Options = {}) {
   //               map (the recorded clips are for teammates; an unmapped actor gets
   //               the 8-bit jingle). Every other Ambient Event is silent and carries
   //               neither flag, which is how the board knows to stay quiet.
-  //   chime:      {"type":"day-chime","at":"09:00"}  (weekdays, on the configured times)
+  //   chime:      {"type":"day-chime","at":"09:00","last":false}  (weekdays, on the
+  //               configured times); "last" is true on the latest configured time — the
+  //               end of the workday, which moves when the Admin Console edits the times.
+  //   scheduled:  {"type":"reminder"|"scheduled-celebration","text":<string>,
+  //               "sound":"sounds/<path>.mp3"|null,"audible":true|false} — an Admin
+  //               Console schedule reaching its minute (on its date, or on its weekdays).
+  //               A Reminder is a banner; a Scheduled Celebration takes the board over.
+  //               Neither joins the Feed. "sound" is the clip to play, if any, and
+  //               "audible" is Quiet Hours at that minute, as for every other sound.
   //   wau target: {"type":"wau-target-hit","audible":true|false, currentWau, targetWau,
   //               targetPercent} — the WAU panel's weekly target crossing 100%: a
   //               Celebration with no PR, "audible" gated by Quiet Hours.
   //               Also sent on demand by a loopback POST /wau-target-hit, with the last read.
-  // No domain event type is called "snapshot", "day-chime" or "wau-target-hit", so `type` tells them apart.
+  // No domain event type is called "snapshot", "day-chime", "wau-target-hit", "reminder" or
+  // "scheduled-celebration", so `type` tells them apart.
   const broadcast = (message: unknown) => {
     for (const client of wss.clients) client.send(JSON.stringify(message));
   };
@@ -665,6 +899,9 @@ export async function startServer(port: number, options: Options = {}) {
     mvp: todaysMvp(),
     devDeploy,
     theme: theme(),
+    sounds: Object.fromEntries(
+      Object.entries(soundSlots).map(([slot, path]) => [slot, `sounds/${path}`]),
+    ),
   });
   wss.on("connection", (socket) => socket.send(JSON.stringify(snapshot())));
 
@@ -965,10 +1202,208 @@ export async function startServer(port: number, options: Options = {}) {
     res.sendStatus(err.status ?? 400);
   }) satisfies ErrorRequestHandler);
 
+  // The Admin Console: its own app on its own port, bound to loopback, so nothing above
+  // can reach it. Funnel exposes port 3000 only; this one is reached through
+  // `tailscale serve`, which is tailnet-only and names the user in Tailscale-User-Login.
+  const admin = express();
+  const audit = (req: express.Request, action: string) =>
+    console.log(`admin: ${req.header("tailscale-user-login") ?? "local"} ${action}`);
+  // No CORS, but a cross-site page can still fire a simple POST (a replay, or an upload
+  // with text/plain) at a tailnet user's console. The browser's own label stops it, and
+  // for a browser that sends none, a write must carry a type no simple request can, so
+  // the browser has to preflight it, and the preflight finds no CORS.
+  // ponytail: no Host check; DNS rebinding only matters for a browser on the Pi itself,
+  // and the upgrade path is a Host allowlist once tailscale serve's Host is confirmed.
+  admin.use((req, res, next) => {
+    const site = req.headers["sec-fetch-site"];
+    if (req.method === "GET" || req.method === "HEAD") next();
+    else if (site && site !== "same-origin" && site !== "none") res.sendStatus(403);
+    else if ((req.method === "POST" || req.method === "PUT") && !req.is(["application/json", "audio/mpeg"]))
+      res.sendStatus(415);
+    else next();
+  });
+  admin.use(express.json());
+
+  admin.get("/api/state", (req, res) => {
+    res.json({
+      // Who the console is signed in as; null when reached without `tailscale serve`.
+      you: req.header("tailscale-user-login") ?? null,
+      theme: {
+        current: theme(),
+        default: defaultTheme,
+        all: readdirSync(THEMES_DIR)
+          .map((file) => file.replace(/\.js$/, ""))
+          .filter(isTheme)
+          .sort(),
+      },
+      quietHours,
+      chimes,
+      names,
+      sounds: { slots: soundSlots, library: library() },
+      schedules,
+    });
+  });
+
+  admin.post("/api/theme", (req, res) => {
+    const { name, permanent = false } = req.body ?? {};
+    if (typeof name !== "string" || typeof permanent !== "boolean") throw invalid("expected {name, permanent?}");
+    if (!isTheme(name)) {
+      res.status(404).json({ error: `${name} is not a Theme in public/themes/` });
+      return;
+    }
+    setTheme(name, permanent);
+    audit(req, `theme ${name}${permanent ? " permanently" : " until midnight"}`);
+    res.sendStatus(204);
+  });
+  admin.delete("/api/theme", (req, res) => {
+    clearTheme();
+    audit(req, "cleared the live theme");
+    res.sendStatus(204);
+  });
+
+  // Any subset of the three; each one present replaces its whole value. All are checked
+  // before any is saved, so a bad field leaves the file and the board as they were.
+  admin.put("/api/settings", (req, res) => {
+    const body = req.body ?? {};
+    const patch: Record<string, unknown> = {};
+    if (body.quietHours !== undefined) patch.quietHours = parseQuietHours(body.quietHours);
+    if (body.chimes !== undefined) patch.chimes = parseChimes(body.chimes);
+    if (body.names !== undefined) patch.names = parseNames(body.names);
+    if (!Object.keys(patch).length) throw invalid("expected some of {quietHours, chimes, names}");
+    saveConfig(patch);
+    quietHours = (patch.quietHours as typeof quietHours) ?? quietHours;
+    chimes = (patch.chimes as string[]) ?? chimes;
+    names = (patch.names as typeof names) ?? names;
+    audit(req, `settings ${JSON.stringify(patch)}`);
+    res.sendStatus(204);
+  });
+
+  // An upload goes in as-is and comes out of scripts/normalize-sound.py, like every
+  // other clip on the board. No overwriting: a replaced clip at the same URL would play
+  // stale from the kiosk's cache, so changing one is delete, then upload.
+  const normalize = options.normalize ?? normalizeSound;
+  // One normalization at a time: each one is a python3 holding a whole clip in memory.
+  let normalizing = false;
+  admin.post("/api/sounds", express.raw({ type: "audio/mpeg", limit: "10mb" }), async (req, res) => {
+    const name = req.query.name;
+    if (typeof name !== "string" || !SOUND_NAME.test(name))
+      throw invalid(`name must be lowercase letters, digits and dashes, ending .mp3`);
+    const body: unknown = req.body;
+    // An ID3 tag, or an MPEG audio frame sync with a real layer (AAC's ADTS has none).
+    const mp3 =
+      Buffer.isBuffer(body) &&
+      (body.subarray(0, 3).toString("latin1") === "ID3" ||
+        (body[0] === 0xff && (body[1]! & 0xe0) === 0xe0 && (body[1]! & 0x06) !== 0));
+    if (!mp3) throw invalid("not an mp3");
+    const dest = join(uploadsDir, name);
+    const taken = () => res.status(409).json({ error: `uploads/${name} already exists` });
+    if (existsSync(dest)) return void taken();
+    if (normalizing)
+      return void res.status(429).json({ error: "another upload is still being normalized, try again shortly" });
+    mkdirSync(uploadsDir, { recursive: true });
+    // Dot-named, so the library listing (and express.static) never shows a half-written file.
+    const tmp = join(uploadsDir, `.${randomUUID()}`);
+    // The normalizer names the hidden temp files it was handed; the admin reading its
+    // output knows the clip as what they uploaded and where it lands in the library.
+    const named = (text: string) =>
+      text.replaceAll(`${tmp}.in.mp3`, name).replaceAll(`${tmp}.out.mp3`, `uploads/${name}`);
+    normalizing = true;
+    try {
+      writeFileSync(`${tmp}.in.mp3`, body);
+      let output: string;
+      try {
+        output = named(await normalize(`${tmp}.in.mp3`, `${tmp}.out.mp3`));
+      } catch (error) {
+        throw Object.assign(new Error(`normalize-sound.py failed: ${named((error as Error).message)}`), {
+          status: 422,
+        });
+      }
+      // A link, not a rename: it refuses to replace a file, so two uploads of one name
+      // racing through the normalizer cannot silently overwrite each other.
+      try {
+        linkSync(`${tmp}.out.mp3`, dest);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") return void taken();
+        throw error;
+      }
+      audit(req, `uploaded uploads/${name}`);
+      res.status(201).json({ path: `uploads/${name}`, output });
+    } finally {
+      normalizing = false;
+      rmSync(`${tmp}.in.mp3`, { force: true });
+      rmSync(`${tmp}.out.mp3`, { force: true });
+    }
+  });
+
+  // Uploads only: the committed clips are not the console's to delete.
+  admin.delete("/api/sounds/uploads/:name", (req, res) => {
+    const { name } = req.params;
+    if (!SOUND_NAME.test(name)) throw invalid("not a Sound Library name");
+    const path = `uploads/${name}`;
+    const users = [
+      ...Object.keys(soundSlots).filter((slot) => soundSlots[slot] === path),
+      ...schedules.filter((schedule) => schedule.sound === path).map(({ id }) => `schedule ${id}`),
+    ];
+    if (users.length) {
+      res.status(409).json({ error: `${path} is still assigned to ${users.join(", ")}` });
+      return;
+    }
+    if (!existsSync(join(uploadsDir, name))) {
+      res.status(404).json({ error: `${path} is not in the Sound Library` });
+      return;
+    }
+    unlinkSync(join(uploadsDir, name));
+    audit(req, `deleted ${path}`);
+    res.sendStatus(204);
+  });
+
+  // A patch: each slot named is assigned (a path) or put back to its default (null).
+  admin.put("/api/sound-slots", (req, res) => {
+    const slots = assigned({ ...soundSlots, ...parseSlots(req.body) });
+    saveConfig({ sounds: slots });
+    soundSlots = slots;
+    audit(req, `sound slots ${JSON.stringify(req.body)}`);
+    broadcast(snapshot());
+    res.sendStatus(204);
+  });
+
+  // The whole list, replaced: an edit is the client changing its copy and sending it back.
+  admin.put("/api/schedules", (req, res) => {
+    const next = parseSchedules(req.body);
+    saveConfig({ schedules: next });
+    schedules = next;
+    audit(req, `schedules (${next.length}) ${JSON.stringify(next)}`);
+    res.sendStatus(204);
+  });
+
+  admin.post("/api/wau-target-hit", (req, res) => {
+    replayTargetHit();
+    audit(req, "replayed the Target Hit");
+    res.sendStatus(204);
+  });
+
+  admin.use(express.static(fileURLToPath(new URL("../admin", import.meta.url))));
+  // Previews for the library, uploads included; dotfiles (in-progress uploads) are ignored.
+  admin.use("/sounds", express.static(soundsDir));
+  admin.use(((err, _req, res, _next) => {
+    res.status(err.status ?? 500).json({ error: String(err.message ?? err) });
+  }) satisfies ErrorRequestHandler);
+  const adminHttp = createServer(admin);
+
   // Listen before Backfill. A deploy or crash restart must not make GitHub's webhook
   // endpoint return 502 for the whole API crawl; displays that connect in this brief
   // window receive the completed snapshot as soon as Backfill finishes.
   await new Promise<void>((resolve) => http.listen(port, resolve));
+  // A console that can't listen (its port taken, say) must not take the board and the
+  // webhooks down with it.
+  await new Promise<void>((resolve) =>
+    adminHttp
+      .once("error", (error) => {
+        console.warn(`Admin Console not started: ${error.message}`);
+        resolve();
+      })
+      .listen(options.adminPort ?? Number(process.env.ADMIN_PORT ?? 3001), "127.0.0.1", resolve),
+  );
   await backfill().catch((error) =>
     console.warn(`Backfill failed, serving live events only: ${error}`),
   );
@@ -982,10 +1417,14 @@ export async function startServer(port: number, options: Options = {}) {
     options.reconcileMs ?? 60_000,
   );
 
-  // Day Chime scheduler: poll the clock rather than compute a delay, so the injected
-  // clock (and a Pi whose time jumps after an NTP sync) is followed rather than trusted.
-  // `fired` keeps a chime to one per minute however many ticks land inside it.
-  let fired = "";
+  // Day Chime and schedule scheduler: poll the clock rather than compute a delay, so the
+  // injected clock (and a Pi whose time jumps after an NTP sync) is followed rather than
+  // trusted. `lastMinute` keeps each minute's chimes and schedules to one push however
+  // many ticks land inside it; everything due in a minute fires together, so a Reminder
+  // set for 09:00 and the 09:00 chime both go out. It only moves forward: a clock stepped
+  // back stays quiet until it passes the last minute seen, rather than firing it twice,
+  // and a forward jump skips the minutes in between rather than catching up.
+  let lastMinute = -Infinity;
   let mvpDay = startOfDay(now());
   const scheduler = setInterval(() => {
     const at = new Date(now());
@@ -1001,28 +1440,53 @@ export async function startServer(port: number, options: Options = {}) {
       broadcast(snapshot());
     }
     const hhmm = `${at.getHours()}`.padStart(2, "0") + ":" + `${at.getMinutes()}`.padStart(2, "0");
-    const minute = `${at.toDateString()} ${hhmm}`;
-    if (fired === minute || !isWeekday(at) || !chimes.includes(hhmm)) return;
-    fired = minute;
+    const minute = Math.floor(at.getTime() / 60_000);
+    if (minute <= lastMinute) return;
+    lastMinute = minute;
+    const chime = isWeekday(at) && chimes.includes(hhmm);
+    const today = localDate(at);
+    const due = schedules.filter(
+      (schedule) =>
+        schedule.time === hhmm &&
+        ("date" in schedule ? schedule.date === today : schedule.days.includes(at.getDay())),
+    );
+    if (!chime && !due.length) return;
     // By design: a chime that lands while no display is connected is dropped, not
     // replayed later. This is a display-only board, and a stale 09:00 chime at 09:20
-    // is worse than silence.
-    broadcast({ type: "day-chime", at: hhmm });
+    // is worse than silence. The same goes for a schedule.
+    // "HH:MM" sorts as text, so the latest chime is the last one sorted: the end of the
+    // workday, whatever times the Admin Console has set. Always a boolean: with none,
+    // the board falls back to "17:00 is the end" and a middle 17:00 would end the day.
+    if (chime)
+      broadcast({ type: "day-chime", at: hhmm, last: hhmm === [...chimes].sort().at(-1) });
+    const audible = soundAllowed();
+    for (const { kind, text, sound } of due)
+      broadcast({
+        type: kind === "reminder" ? "reminder" : "scheduled-celebration",
+        text,
+        sound: sound && `sounds/${sound}`,
+        audible,
+      });
   }, options.tickMs ?? 30_000);
 
   return {
     port: (http.address() as AddressInfo).port,
+    /** Undefined when the Admin Console could not listen. */
+    adminPort: (adminHttp.address() as AddressInfo | null)?.port,
     close: () =>
       new Promise<void>((resolve) => {
         clearInterval(scheduler);
         clearInterval(reconciliation);
         for (const client of wss.clients) client.terminate();
+        adminHttp.close();
         http.close(() => resolve());
       }),
   };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const { port } = await startServer(Number(process.env.PORT ?? 3000));
-  console.log(`PR Arcade on http://localhost:${port}`);
+  const { port, adminPort } = await startServer(Number(process.env.PORT ?? 3000));
+  console.log(
+    `PR Arcade on http://localhost:${port}${adminPort ? `, Admin Console on http://127.0.0.1:${adminPort}` : ""}`,
+  );
 }
