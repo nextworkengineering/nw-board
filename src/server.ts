@@ -254,12 +254,9 @@ function normalizeWauDashboard(payload: any) {
     return parsed;
   };
   const scalar = (id: number, name: string) => number(result(id)?.[0]?.[0], name);
-  const targetWau = scalar(WAU_TILES.targetWau, "target WUU");
   // Rows arrive ordered Day 1..7 of the Sat–Fri cycle; the first column is a free
-  // label (the insight has carried "Day 1" and "Saturday" so far). Column 3 is
-  // marketing's daily_target, falling back to targetWau ÷ 7 when missing or not
-  // numeric, and extra columns are ignored, so an edit to the saved query cannot
-  // 502 the board.
+  // label (the insight has carried "Day 1" and "Saturday" so far) and extra
+  // columns are ignored, so an edit to the saved query cannot 502 the board.
   const daily = result(WAU_TILES.daily).map((row: unknown, index: number) => {
     if (!Array.isArray(row)) throw new Error("PostHog daily WUU row is malformed");
     return {
@@ -267,14 +264,13 @@ function normalizeWauDashboard(payload: any) {
       label: String(row[0]),
       current: number(row[1], `daily day ${index + 1} current`),
       previous: number(row[2], `daily day ${index + 1} previous`),
-      target: typeof row[3] === "number" && Number.isFinite(row[3]) ? row[3] : targetWau / 7,
     };
   });
   if (daily.length !== 7) throw new Error("PostHog daily WUU result must contain 7 days");
   return {
     fetchedAt: new Date().toISOString(),
     currentWau: scalar(WAU_TILES.currentWau, "current WUU"),
-    targetWau,
+    targetWau: scalar(WAU_TILES.targetWau, "target WUU"),
     targetPercent: scalar(WAU_TILES.targetPercent, "target percent"),
     activationPercent: scalar(WAU_TILES.activationPercent, "activation percent"),
     daily,
@@ -282,22 +278,19 @@ function normalizeWauDashboard(payload: any) {
 }
 
 /**
- * On pace for today's target? Today's new WUU so far against its daily target
- * pro-rated by the `fraction` of today gone: at noon a 2000 target expects 1000.
- * ponytail: just after every local midnight `expected` is tiny, so the light swings on
- * a handful of users (or ingestion lag), and it judges PostHog's cached numbers
- * against the current clock; add a grace window if anyone watches then.
+ * On pace for the weekly target? The pace is flat, target ÷ 168 an hour since
+ * Saturday midnight local, computed as `elapsedDays` into the Sat–Fri cycle ÷ 7 so a
+ * DST week's 167 or 169 hours is ignored: the week-to-date WUU should be
+ * target × elapsedDays / 7.
+ * ponytail: just after Saturday midnight `expected` is tiny, so the light swings on a
+ * handful of users (or ingestion lag), and it judges PostHog's cached numbers against
+ * the current clock; add a grace window if anyone watches then.
  */
-function onTarget(
-  wau: { daily: { current: number; target: number }[] },
-  today: number,
-  fraction: number,
-) {
-  const { current, target } = wau.daily[today];
-  const expected = target * fraction;
+function onTarget(wau: { currentWau: number; targetWau: number }, elapsedDays: number) {
+  const expected = (wau.targetWau * elapsedDays) / 7;
   if (expected <= 0) return "on";
-  const ratio = current / expected;
-  return ratio >= 1 ? "on" : ratio >= 0.9 ? "behind" : "far-behind";
+  const ratio = wau.currentWau / expected;
+  return ratio >= 0.9 ? "on" : ratio >= 0.7 ? "behind" : "far-behind";
 }
 
 async function limitedText(response: Response, complaint = "news feed exceeds 1 MiB") {
@@ -714,13 +707,14 @@ export async function startServer(port: number, options: Options = {}) {
     const asked = ++wauAsked;
     // Index into `daily` (Sat=0 … Fri=6) by the Pi's local clock; the normaliser has none.
     // Read after the fetch, so a read that spans midnight counts for the new day.
-    // `fraction` is how much of today is gone, for the On Target pace.
+    // `elapsed` adds the fraction of today gone, for the On Target pace: days since
+    // Saturday midnight on the Pi's clock (US Central).
     const clock = () => {
       const t = now();
       const at = new Date(t);
       const today = (at.getDay() + 1) % 7;
       const fraction = (t - startOfDay(t)) / (nextMidnight(t) - startOfDay(t));
-      return { today, dayKey: at.toDateString(), fraction };
+      return { today, dayKey: at.toDateString(), elapsed: today + fraction };
     };
     const token = process.env.POSTHOG_PERSONAL_API_KEY;
     if (!token) {
@@ -757,13 +751,13 @@ export async function startServer(port: number, options: Options = {}) {
       if (!response.ok) throw new Error(`PostHog returned ${response.status}`);
       const payload = await limitedText(response, "WUU dashboard response exceeds 1 MiB");
       const next = normalizeWauDashboard(JSON.parse(payload));
-      const { today, dayKey, fraction } = clock();
+      const { today, dayKey, elapsed } = clock();
       // A slow read asked before the one already applied holds older cache; letting it
       // overwrite lastWau would re-arm the crossing below.
       if (asked < wauApplied) {
         res
           .set("Cache-Control", "no-store")
-          .json({ ...next, today, onTarget: onTarget(next, today, fraction) });
+          .json({ ...next, today, onTarget: onTarget(next, elapsed) });
         return;
       }
       wauApplied = asked;
@@ -788,16 +782,16 @@ export async function startServer(port: number, options: Options = {}) {
       lastWauDay = dayKey;
       res
         .set("Cache-Control", "no-store")
-        .json({ ...lastWau, today, onTarget: onTarget(lastWau, today, fraction) });
+        .json({ ...lastWau, today, onTarget: onTarget(lastWau, elapsed) });
     } catch (error) {
       console.warn(`WUU dashboard unavailable: ${error}`);
       // The cached read sometimes hangs or misses a tile; one bad read should not turn
       // the panel STALE, so serve the last good numbers under their own fetchedAt.
       if (lastWau) {
-        const { today, fraction } = clock();
+        const { today, elapsed } = clock();
         res
           .set("Cache-Control", "no-store")
-          .json({ ...lastWau, today, onTarget: onTarget(lastWau, today, fraction) });
+          .json({ ...lastWau, today, onTarget: onTarget(lastWau, elapsed) });
       } else res.sendStatus(502);
     }
   });

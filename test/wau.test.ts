@@ -35,18 +35,14 @@ async function upstream(handler: RequestListener) {
 
 const tile = (id: number, result: unknown[]) => ({ id, insight: { result } });
 // The saved insight labels rows by weekday of the Sat–Fri cycle and carries a
-// daily-target column.
+// daily-target column the board does not use.
 const DAYS = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
-/**
- * `rows` overrides a day's [current, previous] by index (Sat=0 … Fri=6);
- * `dailyTarget` fills every row's daily-target column, or `null` drops it.
- */
+/** `rows` overrides a day's [current, previous] by index (Sat=0 … Fri=6). */
 const dashboard = (
   targetPercent = "33.7%",
   rows: Record<number, number[]> = {},
   currentWau = 5906,
   targetWau = 17518,
-  dailyTarget: number | null = 2503,
 ) => ({
   results: [
     tile(7119738, [[currentWau]]),
@@ -55,11 +51,7 @@ const dashboard = (
     tile(10992630, [["4.5%"]]),
     tile(
       7119735,
-      DAYS.map((label, day) => [
-        label,
-        ...(rows[day] ?? [1000 + day, 900 + day]),
-        ...(dailyTarget === null ? [] : [dailyTarget]),
-      ]),
+      DAYS.map((label, day) => [label, ...(rows[day] ?? [1000 + day, 900 + day]), 2503]),
     ),
   ],
 });
@@ -108,45 +100,43 @@ test("the WUU route answers from PostHog's cache and refreshes it in the backgro
       label,
       current: 1000 + day,
       previous: 900 + day,
-      target: 2503,
     })),
     today: 5,
-    // Thursday 10:00: 1005 new WUU against 2503 × 10/24 ≈ 1043.
-    onTarget: "behind",
+    // Thursday 10:00 is 5 + 10/24 days in: 5906 WUU against 17518 × 5.4167 / 7 ≈ 13556.
+    onTarget: "far-behind",
   });
   expect(JSON.stringify(body)).not.toContain("test-posthog-token");
 });
 
-/** The On Target light for a read served at Thursday noon. */
-async function onTargetAtThursdayNoon(read: ReturnType<typeof dashboard>) {
+/** The On Target light for a read served at `at` (Thursday noon by default). */
+async function onTargetAt(read: ReturnType<typeof dashboard>, at = thursdayAt(12)) {
   const base = await upstream((req, res) => {
     if (new URL(req.url!, "http://x").searchParams.get("refresh") === "blocking") return;
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify(read));
   });
-  running = await startServer(0, { configPath, posthogApiBase: base, now: () => thursdayAt(12) });
+  running = await startServer(0, { configPath, posthogApiBase: base, now: () => at });
   return (await (await fetch(`http://127.0.0.1:${running.port}/wau.json`)).json()).onTarget;
 }
 
-// Thursday noon is half of today gone: a 2000 daily target expects 1000 by now.
+// Thursday noon is 5.5 days into the Sat–Fri cycle: a 7000 target expects 5500 by now.
 test.each([
-  [1000, 2000, "on"],
-  [950, 2000, "behind"],
-  [900, 2000, "behind"],
-  [899, 2000, "far-behind"],
-  [500, 2000, "far-behind"],
+  [5500, 7000, "on"],
+  [4950, 7000, "on"],
+  [4949, 7000, "behind"],
+  [3850, 7000, "behind"],
+  [3849, 7000, "far-behind"],
   [0, 0, "on"],
-])("%i new WUU against a %i daily target at Thursday noon is %s", async (current, target, expected) => {
-  expect(
-    await onTargetAtThursdayNoon(dashboard(undefined, { 5: [current, 0] }, undefined, undefined, target)),
-  ).toBe(expected);
+])("%i WUU against a %i target at Thursday noon is %s", async (current, target, expected) => {
+  expect(await onTargetAt(dashboard(undefined, {}, current, target))).toBe(expected);
 });
 
-test("without a daily-target column the light paces today against the weekly target ÷ 7", async () => {
-  // 7000 ÷ 7 = 1000 a day, so noon expects 500: 480 is within 10%.
-  expect(
-    await onTargetAtThursdayNoon(dashboard(undefined, { 5: [480, 0] }, undefined, 7000, null)),
-  ).toBe("behind");
+// Monday noon is 60 of the week's 168 hours: a 10000 target expects ≈ 3571 by now.
+test.each([
+  [2000, "far-behind"],
+  [3300, "on"],
+])("%i WUU against a 10000 target at Monday noon is %s", async (current, expected) => {
+  expect(await onTargetAt(dashboard(undefined, {}, current, 10000), new Date(2026, 7, 10, 12).getTime())).toBe(expected);
 });
 
 test("a slow PostHog recompute does not hold up the WUU route", async () => {
