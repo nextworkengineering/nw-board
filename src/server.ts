@@ -18,8 +18,9 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import express, { type ErrorRequestHandler, type RequestHandler } from "express";
 import { WebSocketServer } from "ws";
-import { createHistory, login, type DomainEvent } from "./backfill.ts";
-import { cycleDay, nextMidnight, startOfDay, startOfWeek } from "./clock.ts";
+import { createHistory, login, type DomainEvent, type Happening } from "./backfill.ts";
+import { createBoard } from "./board.ts";
+import { cycleDay } from "./clock.ts";
 import { createMonitor, type Reading } from "./monitor.ts";
 import { createScheduler, dueAt, type Schedule } from "./scheduler.ts";
 import { statusReader, type ServiceStatus } from "./status.ts";
@@ -353,8 +354,8 @@ export async function startServer(port: number, options: Options = {}) {
 
   // The Theme the board wears when nothing live overrides it. Optional: existing Pi
   // installs keep config.json across deploys, and they wore kernel before this key.
-  // A POST /theme?name=<name>&permanent rewrites both this and the file.
-  let defaultTheme: string = config.theme ?? "kernel";
+  // A POST /theme?name=<name>&permanent rewrites the file and the board's default.
+  const defaultTheme: string = config.theme ?? "kernel";
   if (!isTheme(defaultTheme))
     throw new Error(`${configPath}: theme must name a file in public/themes/, e.g. "kernel"`);
 
@@ -370,147 +371,69 @@ export async function startServer(port: number, options: Options = {}) {
     );
   };
 
-  // The Feed: every tracked domain event from the last 24 hours, oldest first.
-  const feed: { at: number; event: DomainEvent }[] = [];
+  // Board State: the Feed, today's MVP, In Dev and the Theme. Displays hear of every
+  // change through its onChange, wired to the one snapshot push below.
+  const board = createBoard({ now, names: () => names, theme: defaultTheme });
   const HOUR_MS = 60 * 60 * 1000;
-  const DAY_MS = 24 * HOUR_MS;
-  const currentFeed = () => {
-    while (feed.length && now() - feed[0]!.at >= DAY_MS) feed.shift();
-    // Each entry carries the timestamp it was recorded at, so a display expires it
-    // by when it happened rather than when the snapshot happened to arrive.
-    return feed.map(({ at, event }) => ({ ...event, at }));
-  };
-
-  // The event types Backfill can rediscover after a restart, so a repeat delivery of
-  // one is the same event rather than a new one. Kept for a whole week (not the Feed's
-  // 24h) because Backfill fetches back to the week start, so a webhook redelivered days
-  // later still meets its Backfilled twin. Ambient repeats — a second comment or a
-  // second changes-requested review — are genuinely new events.
-  // ponytail: keyed by PR, so a PR closed, reopened and closed again in one week shows
-  // its first close only; key by closed_at if that ever matters.
-  const BACKFILLED = new Set(["pr-merged", "pr-opened", "pr-closed", "review-approved"]);
-  const seen = new Set<string>();
-  let seenWeek = startOfWeek(now());
-  /** Forget last week's dedup keys once the week Backfill covers has moved on. */
-  const rollDedupWeek = () => {
-    const week = startOfWeek(now());
-    if (week === seenWeek) return;
-    seenWeek = week;
-    seen.clear();
-  };
-
-  // Today's MVP: the Actor with the most PR merges since local midnight. Derived
-  // from the Feed on read — its 24h window always contains today — so the midnight
-  // reset needs no state and no timer. A tie names every contender, ordered by
-  // first merge of the day (Map insertion order), and the display rotates between them.
-  const todaysMvp = () => {
-    const midnight = startOfDay(now());
-    const counts = new Map<string, number>();
-    for (const { at, event } of feed)
-      // Only merges count toward the crown; "" (GitHub named nobody) can't wear it.
-      if (at >= midnight && event.type === "pr-merged" && event.actor)
-        counts.set(event.actor, (counts.get(event.actor) ?? 0) + 1);
-    let mvp: { names: string[]; count: number } | null = null;
-    for (const [name, count] of counts)
-      if (!mvp || count > mvp.count) mvp = { names: [name], count };
-      else if (count === mvp.count) mvp.names.push(name);
-    return mvp;
-  };
-
-  /**
-   * The one path into state: append to the Feed (which the MVP is read from).
-   * Webhooks and Backfill both land here (Backfill with the event's real `at`), so
-   * today's MVP rebuilds from Backfill for free. Repeats of a Backfillable event (same
-   * type/repo/number, this week) are dropped — that's what stops a webhook duplicating
-   * what Backfill already fetched. Returns true when the event was recorded, or null
-   * for a dropped repeat.
-   */
-  const recordEvent = (event: DomainEvent, at: number = now()): true | null => {
-    // An event with no parseable timestamp (a Backfilled PR missing created_at, say)
-    // would sit in the Feed forever: the expiry loop stops at the first entry it
-    // cannot age out. Undateable is unshowable, so drop it.
-    if (!Number.isFinite(at)) return null;
-    // Display names live here, the one path into state: mutating the caller's
-    // event on purpose so the broadcast that follows carries the name too. hasOwn, so
-    // a login like "constructor" is not read off Object.prototype.
-    const who = event.actor;
-    event.actor = Object.hasOwn(names, who) ? names[who]! : who;
-    rollDedupWeek(); // roll the week over before deduping
-    // An approval dedups per actor: two people approving the same PR are two
-    // Celebration Events, and keying by PR alone swallowed the second one for the
-    // rest of the week. The other types stay keyed by PR — Backfill credits a merge
-    // to the author (the list API carries no merged_by) where the webhook credits
-    // the merger, so keying pr-merged by actor would let one merge through twice.
-    // Keyed by login, not display name: names are live-editable, and a rename must not
-    // let a redelivered approval celebrate twice.
-    const perActor = event.type === "review-approved" ? `/${who}` : "";
-    const key = `${event.type}/${event.repo}/${event.number}${perActor}`;
-    if (BACKFILLED.has(event.type)) {
-      if (seen.has(key)) return null;
-      seen.add(key);
-    }
-    feed.push({ at, event });
-    return true;
-  };
-
-  // The last human to deploy to dev: board state like the MVP, not a Feed event, so
-  // a newer deploy replaces it and nothing expires.
-  let devDeploy: { actor: string; at: number; repo: string; run: number } | null = null;
 
   /**
    * A successful run of the configured deploy workflow, credited to whoever triggered
-   * it. Roster-only on purpose: the question is which human put that on dev, and a run
-   * triggered by a bot names no human. Returns true when it moved the state.
+   * it (Board State keeps it roster-only). Returns true when it moved In Dev.
    */
-  const recordDevDeploy = (repo: string, run: any) => {
-    const actor = login(run?.triggering_actor);
-    if (
-      !devDeployWorkflow ||
-      !trackedRepos.includes(repo) ||
-      run?.path !== `.github/workflows/${devDeployWorkflow}` ||
-      run?.conclusion !== "success" ||
-      !Object.hasOwn(names, actor)
-    )
-      return false;
-    const at = Date.parse(run.updated_at);
-    // A redelivery or a late Backfill must not un-do a newer deploy.
-    if (!Number.isFinite(at) || at <= (devDeploy?.at ?? 0)) return false;
-    devDeploy = { actor: names[actor]!, at, repo, run: run.run_number };
-    return true;
-  };
-  const describeDevDeploy = () =>
-    devDeploy
+  const recordDevDeploy = (repo: string, run: any) =>
+    !!devDeployWorkflow &&
+    trackedRepos.includes(repo) &&
+    run?.path === `.github/workflows/${devDeployWorkflow}` &&
+    run?.conclusion === "success" &&
+    board.recordDeploy(login(run.triggering_actor), Date.parse(run.updated_at), repo, run.run_number);
+  const describeDevDeploy = () => {
+    const { devDeploy } = board.snapshot();
+    return devDeploy
       ? `in dev = ${devDeploy.actor} (${devDeploy.repo} run ${devDeploy.run}, ${new Date(devDeploy.at).toISOString()})`
       : "nobody in dev";
+  };
 
   // A repo without the workflow answers 404 — it just has no dev deploys to find — so
   // ask it hourly, not once a minute. Not forever: a 404 can also be a token blip or a
   // repo that gains the workflow later.
   const askAgainAt = new Map<string, number>();
   /**
-   * Re-read the deploy workflow's latest successful runs for every Tracked Repo and
-   * credit the newest. Backfill and the reconcile poll share this: the header is state
-   * with no Feed entry to dedup against, so a lost workflow_run webhook (or a Backfill
-   * that read something odd during a flaky boot) has nothing else to repair it.
-   * Returns true when the state moved.
+   * Re-read the deploy workflow's latest successful runs for every Tracked Repo.
+   * Backfill and the reconcile poll share this: the header is state with no Feed entry
+   * to dedup against, so a lost workflow_run webhook (or a Backfill that read something
+   * odd during a flaky boot) has nothing else to repair it. Only read here; `recordFound`
+   * credits the newest.
    */
-  const refreshDevDeploys = async (caller: string) => {
-    let moved = false;
-    if (!devDeployWorkflow) return moved;
+  const devDeployRuns = async (caller: string) => {
+    const found: { repo: string; run: any }[] = [];
+    if (!devDeployWorkflow) return found;
     for (const repo of trackedRepos) {
       if (now() < (askAgainAt.get(repo) ?? 0)) continue;
       try {
         const runs = await get(
           `${repo}/actions/workflows/${devDeployWorkflow}/runs?status=success&per_page=20`,
         );
-        for (const run of runs.workflow_runs ?? []) if (recordDevDeploy(repo, run)) moved = true;
+        for (const run of runs.workflow_runs ?? []) found.push({ repo, run });
       } catch (error) {
         if ((error as { status?: number }).status === 404) askAgainAt.set(repo, now() + HOUR_MS);
         console.warn(`${caller} found no dev deploys in ${repo}: ${error}`);
       }
     }
-    return moved;
+    return found;
   };
+
+  /**
+   * Record what a Backfill or Reconcile read, in one batch so the displays get one
+   * snapshot for all of it. Returns how many events were new and whether In Dev moved.
+   */
+  const recordFound = (happenings: Happening[], runs: { repo: string; run: any }[]) =>
+    board.batch(() => {
+      let recovered = 0;
+      let devMoved = false;
+      for (const { at, event } of happenings) if (board.record(event, at)) recovered++;
+      for (const { repo, run } of runs) if (recordDevDeploy(repo, run)) devMoved = true;
+      return { recovered, devMoved };
+    });
 
   const app = express();
 
@@ -568,14 +491,6 @@ export async function startServer(port: number, options: Options = {}) {
     else res.sendStatus(502); // no reading yet
   });
 
-  // The Theme worn now: config.theme, unless a live override still holds. Every live
-  // override — a Target Hit's Arcade Theme or a POST /theme?name= — lasts until the
-  // next local midnight or a DELETE /theme. Last write wins, and a ?permanent switch
-  // counts as a write: it clears `live` so the new config.theme shows at once.
-  // ponytail: `live` is in-memory, so a restart drops it; it only lasts the day anyway.
-  let live: { name: string; until: number } | null = null;
-  const theme = () => (live && now() < live.until ? live.name : defaultTheme);
-  const wearUntilMidnight = (name: string) => (live = { name, until: nextMidnight(now()) });
   // WUU as the displays were last told it, for curl through the Funnel. Never a PostHog
   // call per request: the Monitor below reads it once a minute. No credential, no panel.
   app.get("/wau.json", (_req, res) => {
@@ -610,22 +525,13 @@ export async function startServer(port: number, options: Options = {}) {
 
   /** Wear `name` until local midnight, or make it config.theme for good. Throws if the save fails. */
   const setTheme = (name: string, permanent: boolean) => {
-    if (permanent) {
-      saveConfig({ theme: name });
-      defaultTheme = name;
-      // A permanent switch counts as the last write, so it beats any live override.
-      live = null;
-    } else wearUntilMidnight(name);
-    broadcast(snapshot());
-  };
-  const clearTheme = () => {
-    live = null;
-    broadcast(snapshot());
+    if (permanent) saveConfig({ theme: name });
+    board.setTheme(name, { permanent });
   };
 
   /** Replays the Target Hit on demand, with today's row from the last WUU reading. */
   const replayTargetHit = () => {
-    wearUntilMidnight("arcade");
+    board.setTheme("arcade", { silent: true });
     const row = wauMonitor?.current()?.value.daily[cycleDay(now())];
     broadcast({
       type: "wau-target-hit",
@@ -671,7 +577,7 @@ export async function startServer(port: number, options: Options = {}) {
     res.sendStatus(204);
   });
   app.delete("/theme", piOnly, (_req, res) => {
-    clearTheme();
+    board.clearTheme();
     res.sendStatus(204);
   });
 
@@ -749,10 +655,7 @@ export async function startServer(port: number, options: Options = {}) {
   };
   const snapshot = () => ({
     type: "snapshot",
-    feed: currentFeed(),
-    mvp: todaysMvp(),
-    devDeploy,
-    theme: theme(),
+    ...board.snapshot(),
     sounds: Object.fromEntries(
       Object.entries(soundSlots).map(([slot, path]) => [slot, `sounds/${path}`]),
     ),
@@ -760,6 +663,9 @@ export async function startServer(port: number, options: Options = {}) {
     wau: wauPayload(wauMonitor?.current()),
   });
   wss.on("connection", (socket) => socket.send(JSON.stringify(snapshot())));
+  // The one snapshot push: whatever changed, the displays get the whole board again.
+  const pushSnapshot = () => broadcast(snapshot());
+  board.onChange(pushSnapshot);
 
   // Service Status, read here rather than by each display: one set of upstream calls a
   // minute however many screens (and Funnel curls) are watching, pushed on change.
@@ -792,7 +698,8 @@ export async function startServer(port: number, options: Options = {}) {
             console.log(
               `WUU daily beat: ${label} ${current} > ${previous} sound=${audible ? "clip" : "silent (quiet hours)"}`,
             );
-            wearUntilMidnight("arcade");
+            // Silently: the takeover below tells every display about the Arcade Theme.
+            board.setTheme("arcade", { silent: true });
             broadcast({ type: "wau-target-hit", audible, label, current, previous });
           },
         }),
@@ -835,17 +742,12 @@ export async function startServer(port: number, options: Options = {}) {
       return;
     }
     const entries = await history.backfill();
-
     // The last dev deploy is state, not a Feed entry, so a restart has to refetch it
-    // or the header sits blank until the next deploy. Say what was chosen: a stale
-    // header is otherwise undiagnosable from the journal.
-    if (devDeployWorkflow) {
-      await refreshDevDeploys("Backfill");
-      console.log(`Backfill: ${describeDevDeploy()}`);
-    }
-
-    // Oldest first, matching the Feed's order (its 24h expiry shifts off the front).
-    for (const { at, event } of entries) recordEvent(event, at);
+    // or the header sits blank until the next deploy.
+    const runs = await devDeployRuns("Backfill");
+    recordFound(entries, runs);
+    // Say what was chosen: a stale header is otherwise undiagnosable from the journal.
+    if (devDeployWorkflow) console.log(`Backfill: ${describeDevDeploy()}`);
   }
 
   /**
@@ -860,17 +762,14 @@ export async function startServer(port: number, options: Options = {}) {
     if (!token || reconciling) return;
     reconciling = true;
     try {
-      let recovered = 0;
-      for (const { at, event } of await history.reconcile())
-        if (recordEvent(event, at)) recovered++;
+      const happenings = await history.reconcile();
       // The header is state, not an event, so a lost workflow_run delivery leaves no
       // PR to notice; the runs list is the only place it can be repaired from.
       // Not counted as a recovered event: In Dev is board state, not an event.
-      const devMoved = await refreshDevDeploys("Reconcile");
+      const { recovered, devMoved } = recordFound(happenings, await devDeployRuns("Reconcile"));
       if (devMoved) console.log(`reconcile: ${describeDevDeploy()}`);
       if (recovered)
         console.log(`reconcile: recovered ${recovered} missed event${recovered === 1 ? "" : "s"}`);
-      if (recovered || devMoved) broadcast(snapshot());
     } finally {
       reconciling = false;
     }
@@ -900,13 +799,12 @@ export async function startServer(port: number, options: Options = {}) {
     // different meanings, and debugging a live miss on the Pi needs to see which.
     const delivery = req.header("x-github-delivery") ?? "?";
     // A deploy is not a PR event: it carries no PR to name, so it updates the header
-    // state and pushes a snapshot rather than joining the Feed.
+    // state (and the displays with it) rather than joining the Feed.
     if (githubEvent === "workflow_run") {
       const recorded = recordDevDeploy(payload.repository?.full_name, payload.workflow_run);
       console.log(
         `webhook ${delivery}: ${recorded ? describeDevDeploy() : "ignored workflow_run"}`,
       );
-      if (recorded) broadcast(snapshot());
       res.sendStatus(204);
       return;
     }
@@ -917,9 +815,9 @@ export async function startServer(port: number, options: Options = {}) {
     } else if (!trackedRepos.includes(event.repo)) {
       console.log(`webhook ${delivery}: untracked repo ${event.repo}`);
     } else {
-      // Checked against the login before recordEvent swaps in the display name: the
-      // map is the roster, so an unmapped login (a bot, an outside contributor) is
-      // not someone we play a sample for.
+      // Checked against the login, not the display name the board shows: the map is
+      // the roster, so an unmapped login (a bot, an outside contributor) is not
+      // someone we play a sample for.
       const teammate = Object.hasOwn(names, event.actor);
       // Read once: the broadcast below must not re-ask a clock that may have ticked
       // past soundEnd since this line, or the log and the board disagree.
@@ -929,23 +827,18 @@ export async function startServer(port: number, options: Options = {}) {
       const sound = !SOUNDED.has(event.type)
         ? ""
         : ` sound=${!audible ? "silent (quiet hours)" : teammate ? "clip" : "jingle (actor not on the roster)"}`;
-      const recorded = recordEvent(event);
-      console.log(
-        `webhook ${delivery}: ${recorded ? "recorded" : "repeat, dropped"} ${event.type} ${event.repo}#${event.number}${sound}`,
-      );
-      // null = repeat of something already recorded (e.g. Backfill got there
-      // first): no state change, so nothing to tell the displays.
-      if (recorded) {
-        broadcast(
-          SOUNDED.has(event.type)
-            ? { ...event, audible, teammate }
-            : event,
+      // Any event can change today's MVP, so every recorded one is followed by a fresh
+      // snapshot rather than a second message shape for state the snapshot already
+      // carries. Batched, so that snapshot goes out after the event itself.
+      board.batch(() => {
+        const shown = board.record(event, now());
+        console.log(
+          `webhook ${delivery}: ${shown ? "recorded" : "repeat, dropped"} ${event.type} ${event.repo}#${event.number}${sound}`,
         );
-        // Any event can change today's MVP, so follow every recorded one with a fresh
-        // snapshot rather than inventing a second message shape for state the snapshot
-        // already carries.
-        broadcast(snapshot());
-      }
+        // null = repeat of something already recorded (e.g. Backfill got there
+        // first): no state change, so nothing to tell the displays.
+        if (shown) broadcast(SOUNDED.has(event.type) ? { ...shown, audible, teammate } : shown);
+      });
     }
     res.sendStatus(204);
   });
@@ -982,8 +875,7 @@ export async function startServer(port: number, options: Options = {}) {
       // Who the console is signed in as; null when reached without `tailscale serve`.
       you: req.header("tailscale-user-login") ?? null,
       theme: {
-        current: theme(),
-        default: defaultTheme,
+        ...board.theme(),
         all: readdirSync(THEMES_DIR)
           .map((file) => file.replace(/\.js$/, ""))
           .filter(isTheme)
@@ -1009,7 +901,7 @@ export async function startServer(port: number, options: Options = {}) {
     res.sendStatus(204);
   });
   admin.delete("/api/theme", (req, res) => {
-    clearTheme();
+    board.clearTheme();
     audit(req, "cleared the live theme");
     res.sendStatus(204);
   });
@@ -1116,7 +1008,8 @@ export async function startServer(port: number, options: Options = {}) {
     saveConfig({ sounds: slots });
     soundSlots = slots;
     audit(req, `sound slots ${JSON.stringify(req.body)}`);
-    broadcast(snapshot());
+    // Not Board State, but the snapshot carries it.
+    pushSnapshot();
     res.sendStatus(204);
   });
 
@@ -1145,8 +1038,9 @@ export async function startServer(port: number, options: Options = {}) {
 
   // Listen before Backfill. A deploy or crash restart must not make GitHub's webhook
   // endpoint return 502 for the whole API crawl; displays that connect in this brief
-  // window receive the completed snapshot as soon as Backfill finishes. Every interface
-  // unless LISTEN_HOST names one (the tests pin 127.0.0.1; see test/helpers.ts).
+  // window receive the completed snapshot as soon as Backfill records it, and the first
+  // Service Status and WUU readings as their own pushes. Every interface unless
+  // LISTEN_HOST names one (the tests pin 127.0.0.1; see test/helpers.ts).
   await new Promise<void>((resolve) => http.listen(port, process.env.LISTEN_HOST, resolve));
   // A console that can't listen (its port taken, say) must not take the board and the
   // webhooks down with it.
@@ -1159,7 +1053,7 @@ export async function startServer(port: number, options: Options = {}) {
       .listen(options.adminPort ?? Number(process.env.ADMIN_PORT ?? 3001), "127.0.0.1", resolve),
   );
   // The first Service Status and WUU reads started with their Monitors; wait for them
-  // alongside Backfill so the boot snapshot (and /status.json, /wau.json) has the panels too.
+  // alongside Backfill so /status.json and /wau.json have them once startServer resolves.
   await Promise.all([
     backfill().catch((error) =>
       console.warn(`Backfill failed, serving live events only: ${error}`),
@@ -1167,7 +1061,6 @@ export async function startServer(port: number, options: Options = {}) {
     statusMonitor.current() ?? statusMonitor.refresh(),
     wauMonitor && (wauMonitor.current() ?? wauMonitor.refresh()),
   ]);
-  broadcast(snapshot());
 
   const reconciliation = setInterval(
     () =>
@@ -1181,19 +1074,13 @@ export async function startServer(port: number, options: Options = {}) {
   // By design: one that lands while no display is connected is dropped, not replayed
   // later. This is a display-only board, and a stale 09:00 chime at 09:20 is worse
   // than silence.
-  // The MVP is derived on read, so a display connected across local midnight would
-  // keep yesterday's leader until something else happened; the rollover pushes one
-  // snapshot. A live Theme ends at that same midnight and rides the same push, and is
-  // also checked each minute on its own so a clock that jumps doesn't strand it.
-  const rollover = () => {
-    if (live !== null && now() >= live.until) live = null;
-    broadcast(snapshot());
-  };
+  // Local midnight rolls Board State over (today's MVP, a live Theme) in one push. A
+  // live Theme is also checked each minute on its own so a clock that jumps doesn't strand it.
   const scheduler = createScheduler({
     now,
-    onMidnight: rollover,
+    onMidnight: () => board.rollover(),
     onMinute: (at) => {
-      if (live !== null && at >= live.until) rollover();
+      board.expireTheme();
       const { chime, schedules: due } = dueAt(at, chimes, schedules);
       if (chime) broadcast({ type: "day-chime", ...chime });
       if (!due.length) return;
