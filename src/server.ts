@@ -18,19 +18,8 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import express, { type ErrorRequestHandler, type RequestHandler } from "express";
 import { WebSocketServer } from "ws";
+import { createHistory, login, type DomainEvent } from "./backfill.ts";
 import { cycleDay, dayKey, localDate, nextMidnight, startOfDay, startOfWeek } from "./clock.ts";
-
-type DomainEvent = {
-  type: string;
-  repo: string;
-  number: number;
-  title: string;
-  /** Who did it. Never undefined on the wire: an unnamed GitHub user is "". */
-  actor: string;
-};
-
-/** The login of whoever GitHub named, or "" when it named nobody. */
-const login = (who: any) => who?.login ?? "";
 
 /** Translate a GitHub delivery into the domain vocabulary. Anything else is ignored. */
 function toDomainEvent(
@@ -536,7 +525,9 @@ export async function startServer(port: number, options: Options = {}) {
   // 24h) because Backfill fetches back to the week start, so a webhook redelivered days
   // later still meets its Backfilled twin. Ambient repeats — a second comment or a
   // second changes-requested review — are genuinely new events.
-  const BACKFILLED = new Set(["pr-merged", "pr-opened", "review-approved"]);
+  // ponytail: keyed by PR, so a PR closed, reopened and closed again in one week shows
+  // its first close only; key by closed_at if that ever matters.
+  const BACKFILLED = new Set(["pr-merged", "pr-opened", "pr-closed", "review-approved"]);
   const seen = new Set<string>();
   let seenWeek = startOfWeek(now());
   /** Forget last week's dedup keys once the week Backfill covers has moved on. */
@@ -1000,7 +991,7 @@ export async function startServer(port: number, options: Options = {}) {
 
   const token = process.env.GITHUB_TOKEN;
   const apiBase = options.githubApiBase ?? "https://api.github.com";
-  /** GET a list under /repos, e.g. "owner/name/pulls?state=open". */
+  /** GET a path under /repos, e.g. "owner/name/actions/runs". */
   const get = async (path: string) => {
     const response = await fetch(`${apiBase}/repos/${path}`, {
       headers: {
@@ -1015,11 +1006,12 @@ export async function startServer(port: number, options: Options = {}) {
     return (await response.json()) as any;
   };
 
+  const history = createHistory({ get, now, repos: trackedRepos });
+
   /**
    * Backfill: rebuild the Feed from the GitHub API so a fresh boot is never blank and
-   * downtime leaves no gap. Fetches back to the start of the week or the last 24h,
-   * whichever is further, so the dedup set knows every event a webhook might redeliver
-   * from this week and the Feed gets its whole window even on a Monday morning.
+   * downtime leaves no gap. Reaches back far enough that the dedup set knows every
+   * event a webhook might redeliver from this week (see createHistory).
    * Any failure is logged and skipped — live webhooks still work without it.
    */
   async function backfill() {
@@ -1029,87 +1021,7 @@ export async function startServer(port: number, options: Options = {}) {
       );
       return;
     }
-    // How far back to fetch: far enough for both windows Backfill serves. The dedup
-    // set spans the week, but the Feed spans the last 24h — and early in the week the
-    // week is younger than that, so a Monday-morning boot fetching only back to Monday
-    // 00:00 leaves the Feed blank for everything the weekend still owes it.
-    const since = Math.min(startOfWeek(now()), now() - DAY_MS);
-    const entries: { at: number; event: DomainEvent }[] = [];
-
-    const backfillRepo = async (repo: string) => {
-      // PRs touched this week, whose reviews may hold this week's approvals.
-      const active: any[] = [];
-      for (const pr of await get(`${repo}/pulls?state=open&per_page=100`)) {
-        entries.push({
-          at: Date.parse(pr.created_at),
-          event: {
-            type: "pr-opened",
-            repo,
-            number: pr.number,
-            title: pr.title,
-            actor: login(pr.user),
-          },
-        });
-        if (Date.parse(pr.updated_at) >= since) active.push(pr);
-      }
-      // Closed PRs come back newest-updated first, so we can stop at the first one
-      // that predates the week.
-      // ponytail: one page per repo — the ceiling is 100 closed PRs per repo per
-      // week; page through only if a repo ever outruns that.
-      for (const pr of await get(
-        `${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100`,
-      )) {
-        if (Date.parse(pr.updated_at) < since) break;
-        active.push(pr);
-        const mergedAt = pr.merged_at ? Date.parse(pr.merged_at) : 0;
-        if (mergedAt >= since)
-          entries.push({
-            at: mergedAt,
-            event: {
-              type: "pr-merged",
-              repo,
-              number: pr.number,
-              title: pr.title,
-              // The list API returns no merged_by, so the author is an honest lazy
-              // stand-in for the merger.
-              actor: login(pr.user),
-            },
-          });
-      }
-      // Approvals are Celebration Events, so a restart mid-morning has to refetch them
-      // or they vanish from the Feed and today's MVP. One request per PR touched this
-      // week; a repo that refuses the read loses its approvals, not the whole Backfill.
-      for (const pr of active) {
-        let reviews: any[];
-        try {
-          reviews = await get(`${repo}/pulls/${pr.number}/reviews`);
-        } catch (error) {
-          console.warn(`Backfill skipped reviews for ${repo}#${pr.number}: ${error}`);
-          continue;
-        }
-        for (const review of reviews) {
-          const at = Date.parse(review.submitted_at);
-          if (review.state !== "APPROVED" || !(at >= since)) continue;
-          entries.push({
-            at,
-            event: {
-              type: "review-approved",
-              repo,
-              number: pr.number,
-              title: pr.title,
-              actor: login(review.user),
-            },
-          });
-        }
-      }
-    };
-
-    // One repo the token can't read (or that errors) loses its own history, not
-    // the whole board's — the other Tracked Repos' entries still land.
-    for (const repo of trackedRepos)
-      await backfillRepo(repo).catch((error) =>
-        console.warn(`Backfill failed for ${repo}, its history is live-only: ${error}`),
-      );
+    const entries = await history.backfill();
 
     // The last dev deploy is state, not a Feed entry, so a restart has to refetch it
     // or the header sits blank until the next deploy. Say what was chosen: a stale
@@ -1120,89 +1032,24 @@ export async function startServer(port: number, options: Options = {}) {
     }
 
     // Oldest first, matching the Feed's order (its 24h expiry shifts off the front).
-    for (const { at, event } of entries.sort((a, b) => a.at - b.at))
-      recordEvent(event, at);
+    for (const { at, event } of entries) recordEvent(event, at);
   }
 
   /**
-   * GitHub does not retry a repository webhook that received a 502. Poll the cheap
-   * PR lists between full Backfills so missed merges and approvals repair themselves
-   * while the process stays up. Dedup makes every successful webhook win the race;
-   * this path records only the misses and refreshes the board without replaying a
-   * stale celebration sound.
+   * GitHub does not retry a repository webhook that received a 502. Re-read the same
+   * history Backfill does, over the last 24h, between full Backfills so missed
+   * openings, merges, closes and approvals repair themselves while the process stays
+   * up. Dedup makes every successful webhook win the race; this path records only the
+   * misses and refreshes the board without replaying a stale sound or takeover.
    */
   let reconciling = false;
   async function reconcile() {
     if (!token || reconciling) return;
     reconciling = true;
-    let recovered = 0;
-    const since = now() - DAY_MS;
-    // A lost pull_request_review delivery leaves no trace here, but submitting a
-    // review bumps the PR's updated_at — so only recently-touched PRs need their
-    // reviews refetched.
-    // ponytail: 30-minute lookback keeps this to a couple of requests per tick; a
-    // delivery lost longer ago than that waits for the next restart's Backfill.
-    const reviewSince = now() - 30 * 60_000;
     try {
-      for (const repo of trackedRepos) {
-        let pulls: any[];
-        let open: any[];
-        try {
-          pulls = await get(`${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100`);
-          open = await get(`${repo}/pulls?state=open&per_page=100`);
-        } catch (error) {
-          console.warn(`Reconcile failed for ${repo}: ${error}`);
-          continue;
-        }
-        // The API returns newest-updated first. Record oldest-first so simultaneous
-        // recovered merges retain their real order in the Feed.
-        const merges = pulls
-          .filter((pr) => pr.merged_at && Date.parse(pr.merged_at) >= since)
-          .sort((a, b) => Date.parse(a.merged_at) - Date.parse(b.merged_at));
-        for (const pr of merges)
-          if (
-            recordEvent(
-              {
-                type: "pr-merged",
-                repo,
-                number: pr.number,
-                title: pr.title,
-                // The list endpoint has no merged_by. This is the same honest
-                // author stand-in used by startup Backfill.
-                actor: login(pr.user),
-              },
-              Date.parse(pr.merged_at),
-            )
-          )
-            recovered++;
-        for (const pr of [...open, ...pulls]) {
-          if (!(Date.parse(pr.updated_at) >= reviewSince)) continue;
-          let reviews: any[];
-          try {
-            reviews = await get(`${repo}/pulls/${pr.number}/reviews`);
-          } catch (error) {
-            console.warn(`Reconcile skipped reviews for ${repo}#${pr.number}: ${error}`);
-            continue;
-          }
-          for (const review of reviews) {
-            const at = Date.parse(review.submitted_at);
-            if (review.state !== "APPROVED" || !(at >= since)) continue;
-            if (
-              recordEvent(
-                {
-                  type: "review-approved",
-                  repo,
-                  number: pr.number,
-                  title: pr.title,
-                  actor: login(review.user),
-                },
-                at,
-              )
-            )
-              recovered++;
-          }
-        }
-      }
+      let recovered = 0;
+      for (const { at, event } of await history.reconcile())
+        if (recordEvent(event, at)) recovered++;
       // The header is state, not an event, so a lost workflow_run delivery leaves no
       // PR to notice; the runs list is the only place it can be repaired from.
       // Not counted as a recovered event: In Dev is board state, not an event.
