@@ -878,30 +878,14 @@ export async function startServer(port: number, options: Options = {}) {
       })
       .listen(options.adminPort ?? Number(process.env.ADMIN_PORT ?? 3001), "127.0.0.1", resolve),
   );
-  // The first Service Status and WUU reads started with their Monitors; wait for them
-  // alongside Backfill so /status.json and /wau.json have them once startServer resolves.
-  await Promise.all([
-    backfill().catch((error) =>
-      console.warn(`Backfill failed, serving live events only: ${error}`),
-    ),
-    statusMonitor.current() ?? statusMonitor.refresh(),
-    wauMonitor && (wauMonitor.current() ?? wauMonitor.refresh()),
-  ]);
-
-  const reconciliation = setInterval(
-    () =>
-      void reconcile().catch((error) =>
-        console.warn(`Reconcile failed: ${error}`),
-      ),
-    options.reconcileMs ?? 60_000,
-  );
-
   // Day Chimes, Reminders and Scheduled Celebrations go out on the minute they are due.
   // By design: one that lands while no display is connected is dropped, not replayed
   // later. This is a display-only board, and a stale 09:00 chime at 09:20 is worse
   // than silence.
   // Local midnight rolls Board State over (today's MVP, a live Theme) in one push. A
   // live Theme is also checked each minute on its own so a clock that jumps doesn't strand it.
+  // Started before the boot reads below, which can take most of a minute: a restart
+  // just before 09:00 must still ring the 09:00 chime.
   const scheduler = createScheduler({
     now,
     onMidnight: () => board.rollover(),
@@ -921,6 +905,24 @@ export async function startServer(port: number, options: Options = {}) {
         });
     },
   });
+
+  // The first Service Status and WUU reads started with their Monitors; wait for them
+  // alongside Backfill so /status.json and /wau.json have them once startServer resolves.
+  await Promise.all([
+    backfill().catch((error) =>
+      console.warn(`Backfill failed, serving live events only: ${error}`),
+    ),
+    statusMonitor.current() ?? statusMonitor.refresh(),
+    wauMonitor && (wauMonitor.current() ?? wauMonitor.refresh()),
+  ]);
+
+  const reconciliation = setInterval(
+    () =>
+      void reconcile().catch((error) =>
+        console.warn(`Reconcile failed: ${error}`),
+      ),
+    options.reconcileMs ?? 60_000,
+  );
 
   return {
     port: (http.address() as AddressInfo).port,

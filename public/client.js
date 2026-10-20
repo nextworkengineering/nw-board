@@ -1000,8 +1000,9 @@ function renderWau(data) {
     .toUpperCase();
   wauStatus.text = stale ? `STALE // ${updated} // RETRYING` : `UPDATED ${updated}`;
   wauStatus.style.fill = stale ? C.red : (wauHeader?.ink ?? C.green);
-  // Old cached payloads carry no onTarget: an empty tile, not a guess.
-  const light = ON_TARGET[snapshot.onTarget];
+  // Old cached payloads carry no onTarget: an empty tile, not a guess. Stale dims it,
+  // like the Status lights: a light is a claim about now.
+  const light = ON_TARGET[snapshot.onTarget] && (stale ? C.dim : ON_TARGET[snapshot.onTarget]);
   onTargetLight.clear();
   if (light && T.decorations.stats)
     onTargetLight.circle(112, 80, 32).fill(light).stroke({ width: T.decorations.stats.outline, color: C.ink, alignment: 1 });

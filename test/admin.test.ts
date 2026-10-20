@@ -1,5 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { createServer as createHttpServer } from "node:http";
+import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -589,4 +590,45 @@ test("a redelivered approval stays deduped after its reviewer is renamed", async
   // A login that names an Object.prototype key is still just a login.
   const odd = await postAndWatch(running!.port, approval("constructor"));
   expect(odd.received).toMatchObject([{ type: "review-approved", actor: "constructor", teammate: false }]);
+});
+
+test("a chime due while boot is still reading its upstreams still rings", async () => {
+  const to = at(THURSDAY, 17);
+  let clock = to - 10;
+  // A status page that answers only when told: boot waits on it, as a slow PostHog or
+  // GitHub would make it wait on the Pi.
+  let answer!: () => void;
+  const answered = new Promise<void>((resolve) => (answer = resolve));
+  const slow = createHttpServer(async (_req, res) => {
+    await answered;
+    res.writeHead(503).end();
+  }).listen(0, "127.0.0.1");
+  await new Promise((resolve) => slow.once("listening", resolve));
+  const url = `http://127.0.0.1:${(slow.address() as AddressInfo).port}/`;
+  const squatter = createServer().listen(0, "127.0.0.1");
+  await new Promise((resolve) => squatter.once("listening", resolve));
+  const port = (squatter.address() as AddressInfo).port;
+  await new Promise((resolve) => squatter.close(resolve));
+
+  const booting = startServer(port, {
+    ...setup(),
+    now: () => clock,
+    statusUrls: { github: url, sentry: url, gcp: url },
+  });
+  try {
+    // The board listens before it reads its upstreams, so a display can join mid-boot.
+    let display: Awaited<ReturnType<typeof connectedDisplay>> | undefined;
+    while (!display) display = await connectedDisplay(port).catch(() => sleep(20).then(() => undefined));
+    clock = to;
+    await sleep(200);
+    answer();
+    running = await booting;
+    display.ws.close();
+    expect(display.messages.filter((message) => message.type === "day-chime")).toEqual([
+      { type: "day-chime", at: "17:00", last: true },
+    ]);
+  } finally {
+    answer();
+    slow.close();
+  }
 });
