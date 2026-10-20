@@ -1,5 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { createServer as createHttpServer } from "node:http";
+import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -51,12 +52,10 @@ const stubNormalize = async (src: string, dest: string) => {
 async function start(
   paths: ReturnType<typeof setup>,
   clock: () => number = () => at(THURSDAY, 10),
-  tickMs?: number,
 ) {
   running = await startServer(0, {
     ...paths,
     now: clock,
-    tickMs,
     normalize: stubNormalize,
   });
   return running;
@@ -179,10 +178,16 @@ test.for([
   expect(readFileSync(paths.configPath, "utf8")).toBe(before);
 });
 
-/** Start at `from`, connect a display, move the clock to `to`, and collect what it was pushed. */
-async function watch(paths: ReturnType<typeof setup>, from: number, to: number, before?: () => Promise<void>) {
-  let clock = from;
-  await start(paths, () => clock, 10);
+/**
+ * Start 10 ms before the minute `to`, connect a display, move the clock to `to`, and
+ * collect what it was pushed. While the clock holds just short of the minute the
+ * scheduler re-arms for the 10 ms left, so it lands moments after the move.
+ * Which minutes are due is dueAt's (test/scheduler.test.ts); these check the wiring:
+ * Quiet Hours, and chimes and schedules edited live reaching a display.
+ */
+async function watch(paths: ReturnType<typeof setup>, to: number, before?: () => Promise<void>) {
+  let clock = to - 10;
+  await start(paths, () => clock);
   await before?.();
   const { ws, messages } = await connectedDisplay(running!.port);
   await sleep(50);
@@ -206,8 +211,8 @@ test.for([
     ],
   });
 
-  // 200ms of 10ms ticks: a schedule that fired per tick would show up many times over.
-  const received = await watch(paths, at(THURSDAY, hour as number - 1, 59, 55), at(THURSDAY, hour as number));
+  // Once each, though the scheduler woke every 10ms on the way to the minute.
+  const received = await watch(paths, at(THURSDAY, hour as number));
 
   expect(received).toEqual([
     { type: "reminder", text: "Standup in 5", sound: null, audible },
@@ -215,19 +220,10 @@ test.for([
   ]);
 });
 
-test("a one-off fires on its date only", async () => {
-  const oneOff = (id: string, date: string) => ({ ...reminder, id, text: id, days: undefined, date });
-  const paths = setup({ schedules: [oneOff("today", "2026-08-13"), oneOff("tomorrow", "2026-08-14")] });
-
-  const received = await watch(paths, at(THURSDAY, 9, 59, 55), at(THURSDAY, 10));
-
-  expect(received).toEqual([{ type: "reminder", text: "today", sound: null, audible: true }]);
-});
-
 test("a schedule PUT through the console is live, and fires alongside a chime at the same minute", async () => {
   const paths = setup();
   const schedule = { ...reminder, time: "17:00" };
-  const received = await watch(paths, at(THURSDAY, 16, 59, 55), at(THURSDAY, 17), async () => {
+  const received = await watch(paths, at(THURSDAY, 17), async () => {
     expect((await api("PUT", "/api/schedules", [schedule])).status).toBe(204);
   });
 
@@ -239,44 +235,12 @@ test("a schedule PUT through the console is live, and fires alongside a chime at
   expect(JSON.parse(readFileSync(paths.configPath, "utf8")).schedules).toEqual([schedule]);
 });
 
-test.for([
-  ["the first chime is flagged not last", 9, { type: "day-chime", at: "09:00", last: false }],
-  ["the latest chime is flagged last", 17, { type: "day-chime", at: "17:00", last: true }],
-])("%s", async ([, hour, message]) => {
-  const received = await watch(setup(), at(THURSDAY, hour as number - 1, 59, 55), at(THURSDAY, hour as number));
-  expect(received).toEqual([message]);
-});
-
 test("the last flag follows chime times edited live", async () => {
   const paths = setup();
-  const received = await watch(paths, at(THURSDAY, 16, 59, 55), at(THURSDAY, 17), async () => {
+  const received = await watch(paths, at(THURSDAY, 17), async () => {
     expect((await api("PUT", "/api/settings", { chimes: ["17:00", "18:30"] })).status).toBe(204);
   });
   expect(received).toEqual([{ type: "day-chime", at: "17:00", last: false }]);
-});
-
-// The board's fallback for a chime with no flag is "17:00 is the end", so a 17:00
-// that is not the latest must say so, or the day ends twice.
-test("a middle 17:00 chime carries last:false", async () => {
-  const paths = setup({ chimes: ["09:00", "17:00", "18:00"] });
-  const received = await watch(paths, at(THURSDAY, 16, 59, 55), at(THURSDAY, 17));
-  expect(received).toEqual([{ type: "day-chime", at: "17:00", last: false }]);
-});
-
-test("a clock stepped back across a minute that already fired does not fire it again", async () => {
-  let clock = at(THURSDAY, 9, 58, 55);
-  await start(setup({ chimes: ["09:59", "10:00"] }), () => clock, 10);
-  const { ws, messages } = await connectedDisplay(running!.port);
-  for (const next of [at(THURSDAY, 9, 59), at(THURSDAY, 10), at(THURSDAY, 9, 59, 30), at(THURSDAY, 10, 0, 10)]) {
-    await sleep(80);
-    clock = next;
-  }
-  await sleep(80);
-  ws.close();
-  expect(messages.filter((m) => m.type !== "snapshot")).toEqual([
-    { type: "day-chime", at: "09:59", last: false },
-    { type: "day-chime", at: "10:00", last: true },
-  ]);
 });
 
 test("an upload is normalized into the library and answers with the normalizer's output", async () => {
@@ -434,6 +398,32 @@ test("the theme set through the console is broadcast, and permanent rewrites con
   ]);
   expect((await state()).theme).toMatchObject({ current: "neobrutal", default: "neobrutal" });
   expect(JSON.parse(readFileSync(paths.configPath, "utf8")).theme).toBe("neobrutal");
+});
+
+test("every console write is followed by one fresh snapshot; a refused one by none", async () => {
+  await start(setup());
+  const { ws, messages } = await connectedDisplay(running!.port);
+  await sleep(50);
+
+  expect((await api("PUT", "/api/settings", { chimes: ["10:00"] })).status).toBe(204);
+  expect((await api("PUT", "/api/settings", { names: { octocat: "Octo" } })).status).toBe(204);
+  expect((await api("PUT", "/api/schedules", [reminder])).status).toBe(204);
+  expect((await api("PUT", "/api/sound-slots", { "pr-merged": "builtin.mp3" })).status).toBe(204);
+  expect((await api("PUT", "/api/settings", { chimes: "10:00" })).status).toBe(400);
+  await sleep(50);
+  ws.close();
+
+  // The connect snapshot, then one per accepted write.
+  expect(messages.map((m) => m.type)).toEqual(Array(5).fill("snapshot"));
+});
+
+test("a permanent Theme through the console takes off a live one", async () => {
+  const paths = setup();
+  await start(paths);
+  await api("POST", "/api/theme", { name: "arcade" });
+  expect((await api("POST", "/api/theme", { name: "kernel", permanent: true })).status).toBe(204);
+  expect((await state()).theme).toMatchObject({ current: "kernel", default: "kernel" });
+  expect(JSON.parse(readFileSync(paths.configPath, "utf8")).theme).toBe("kernel");
 });
 
 test("Replay Target Hit through the console takes the board over", async () => {
@@ -600,4 +590,45 @@ test("a redelivered approval stays deduped after its reviewer is renamed", async
   // A login that names an Object.prototype key is still just a login.
   const odd = await postAndWatch(running!.port, approval("constructor"));
   expect(odd.received).toMatchObject([{ type: "review-approved", actor: "constructor", teammate: false }]);
+});
+
+test("a chime due while boot is still reading its upstreams still rings", async () => {
+  const to = at(THURSDAY, 17);
+  let clock = to - 10;
+  // A status page that answers only when told: boot waits on it, as a slow PostHog or
+  // GitHub would make it wait on the Pi.
+  let answer!: () => void;
+  const answered = new Promise<void>((resolve) => (answer = resolve));
+  const slow = createHttpServer(async (_req, res) => {
+    await answered;
+    res.writeHead(503).end();
+  }).listen(0, "127.0.0.1");
+  await new Promise((resolve) => slow.once("listening", resolve));
+  const url = `http://127.0.0.1:${(slow.address() as AddressInfo).port}/`;
+  const squatter = createServer().listen(0, "127.0.0.1");
+  await new Promise((resolve) => squatter.once("listening", resolve));
+  const port = (squatter.address() as AddressInfo).port;
+  await new Promise((resolve) => squatter.close(resolve));
+
+  const booting = startServer(port, {
+    ...setup(),
+    now: () => clock,
+    statusUrls: { github: url, sentry: url, gcp: url },
+  });
+  try {
+    // The board listens before it reads its upstreams, so a display can join mid-boot.
+    let display: Awaited<ReturnType<typeof connectedDisplay>> | undefined;
+    while (!display) display = await connectedDisplay(port).catch(() => sleep(20).then(() => undefined));
+    clock = to;
+    await sleep(200);
+    answer();
+    running = await booting;
+    display.ws.close();
+    expect(display.messages.filter((message) => message.type === "day-chime")).toEqual([
+      { type: "day-chime", at: "17:00", last: true },
+    ]);
+  } finally {
+    answer();
+    slow.close();
+  }
 });

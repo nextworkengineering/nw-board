@@ -1,9 +1,9 @@
 import { createServer, type RequestListener, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { startServer } from "../src/server.ts";
-import { configPath } from "./helpers.ts";
+import { configPath, connectedDisplay, readSnapshot } from "./helpers.ts";
 
 let running: { port: number; close: () => Promise<void> } | undefined;
 const upstreams: Server[] = [];
@@ -28,28 +28,36 @@ const statuspage = (indicator: string, description: string) =>
   json({ status: { indicator, description } });
 
 const CLOUD_RUN = "9D7d2iNBQWN24zc1VamE";
+const NOW = new Date(2026, 9, 20, 9, 0).getTime();
+// A loopback read with a gap since the last one can take ~0.5 s here (keep-alive reuse).
+const PATIENCE = { timeout: 4_000 };
+const ALL_OK = ["GITHUB", "SENTRY", "GCP"].map((name) => ({ name, level: "ok", text: "OPERATIONAL" }));
 
+// Service Status is read once at boot and then every statusIntervalMs (a minute unless a
+// test shortens it); /status.json and the displays get that reading, not a fresh call.
 async function readStatus(statusUrls: object, statusTimeoutMs?: number) {
-  running = await startServer(0, { configPath, statusUrls, statusTimeoutMs });
+  running = await startServer(0, { configPath, statusUrls, statusTimeoutMs, now: () => NOW });
   const response = await fetch(`http://127.0.0.1:${running.port}/status.json`);
   return { response, body: await response.json() };
 }
 
-test("the status route reports every service operational", async () => {
+test("the status route serves the cached reading: every service operational", async () => {
+  let asked = 0;
   const { response, body } = await readStatus({
-    github: await statuspage("none", "All Systems Operational"),
+    github: await upstream((_req, res) => {
+      asked++;
+      res.end(JSON.stringify({ status: { indicator: "none", description: "All Systems Operational" } }));
+    }),
     sentry: await statuspage("none", "All Systems Operational"),
     gcp: await json([]),
   });
 
   expect(response.status).toBe(200);
   expect(response.headers.get("cache-control")).toBe("no-store");
-  expect(Number.isNaN(Date.parse(body.fetchedAt))).toBe(false);
-  expect(body.services).toEqual([
-    { name: "GITHUB", level: "ok", text: "OPERATIONAL" },
-    { name: "SENTRY", level: "ok", text: "OPERATIONAL" },
-    { name: "GCP", level: "ok", text: "OPERATIONAL" },
-  ]);
+  expect(body).toEqual({ fetchedAt: new Date(NOW).toISOString(), services: ALL_OK, stale: false });
+  // The boot read answers every request; none reaches the status page.
+  await fetch(`http://127.0.0.1:${running!.port}/status.json`);
+  expect(asked).toBe(1);
 });
 
 test.for([
@@ -140,4 +148,71 @@ test("a stalled status page times out to unavailable", async () => {
   );
 
   expect(body.services[2]).toEqual({ name: "GCP", level: "unknown", text: "UNAVAILABLE" });
+});
+
+test("status is pushed over the websocket", async () => {
+  let indicator = "none";
+  let asked = 0;
+  running = await startServer(0, {
+    configPath,
+    now: () => NOW,
+    statusIntervalMs: 20,
+    statusUrls: {
+      github: await upstream((_req, res) => {
+        asked++;
+        res.end(JSON.stringify({ status: { indicator, description: "Partial System Outage" } }));
+      }),
+      sentry: await statuspage("none", "All Systems Operational"),
+      gcp: await json([]),
+    },
+  });
+  const { ws, messages } = await connectedDisplay(running.port);
+  const pushed = () => messages.filter((message) => message.type !== "snapshot");
+  // Several more reads of the same answer: no news, so nothing is pushed.
+  await vi.waitFor(() => expect(asked).toBeGreaterThanOrEqual(3), PATIENCE);
+  expect(pushed()).toEqual([]);
+
+  indicator = "minor";
+  await vi.waitFor(() => expect(pushed()).toHaveLength(1), PATIENCE);
+  ws.close();
+  expect(pushed()).toEqual([
+    {
+      type: "status",
+      status: {
+        fetchedAt: new Date(NOW).toISOString(),
+        services: [{ name: "GITHUB", level: "minor", text: "PARTIAL SYSTEM OUTAGE" }, ...ALL_OK.slice(1)],
+        stale: false,
+      },
+    },
+  ]);
+});
+
+test("snapshot carries the status, stale for a display connecting mid-outage", async () => {
+  let now = NOW;
+  let limited = false;
+  const page = (body: unknown) =>
+    upstream((_req, res) => {
+      if (limited) res.writeHead(429, { "retry-after": "3600" }).end();
+      else res.end(JSON.stringify(body));
+    });
+  const operational = { status: { indicator: "none", description: "All Systems Operational" } };
+  running = await startServer(0, {
+    configPath,
+    now: () => now,
+    statusIntervalMs: 20,
+    statusUrls: { github: await page(operational), sentry: await page(operational), gcp: await page([]) },
+  });
+  const fresh = { fetchedAt: new Date(NOW).toISOString(), services: ALL_OK, stale: false };
+  expect((await readSnapshot(running.port)).status).toEqual(fresh);
+
+  // Rate-limited for an hour, and the last good read is over two intervals old: the
+  // board keeps that reading, marked stale, for the next display to connect.
+  limited = true;
+  now += 1_000;
+  await vi.waitFor(async () =>
+    expect((await readSnapshot(running!.port)).status).toEqual({ ...fresh, stale: true }),
+    PATIENCE,
+  );
+  const route = await fetch(`http://127.0.0.1:${running.port}/status.json`);
+  expect(await route.json()).toEqual({ ...fresh, stale: true });
 });

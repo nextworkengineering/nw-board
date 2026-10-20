@@ -71,7 +71,7 @@ const onlyProjectsApp =
     return url.includes("state=open") ? open : closed;
   };
 
-test("a display connecting right after boot receives a snapshot of the backfilled open and merged PRs", async () => {
+test("a display connecting right after boot receives a snapshot of the backfilled open, merged and closed PRs", async () => {
   const api = await stubGitHubApi(
     onlyProjectsApp(
       [
@@ -94,6 +94,7 @@ test("a display connecting right after boot receives a snapshot of the backfille
           number: 3,
           title: "Abandoned one",
           updated_at: ago(3 * HOUR),
+          closed_at: ago(3 * HOUR),
           merged_at: null,
           user: { login: "author-alice" },
         },
@@ -106,6 +107,15 @@ test("a display connecting right after boot receives a snapshot of the backfille
   const snapshot = await connectAndReadSnapshot(running!.port);
   // Backfilled entries keep the GitHub timestamps they actually happened at.
   expect(snapshot.feed).toEqual([
+    {
+      // Closed without merge: the author stands in for whoever closed it.
+      type: "pr-closed",
+      repo: "example-org/projects-app",
+      number: 3,
+      title: "Abandoned one",
+      actor: "author-alice",
+      at: NOW - 3 * HOUR,
+    },
     {
       type: "pr-opened",
       repo: "example-org/projects-app",
@@ -286,16 +296,6 @@ test("Backfilled events older than 24 hours are kept out of the Feed snapshot", 
       title: "Merged an hour ago",
       actor: "author-alice",
       at: NOW - HOUR,
-    },
-  ]);
-  // The open PR is state, not a 24h event: it stays on the board however old it is,
-  // carrying its author.
-  expect(snapshot.openPrs).toEqual([
-    {
-      repo: "example-org/projects-app",
-      number: 1,
-      title: "Stale open one",
-      actor: "stale-sam",
     },
   ]);
 });
@@ -589,6 +589,114 @@ test("an approval whose webhook failed is recovered while the server stays up", 
     (await connectAndReadSnapshot(running.port)).feed.filter(
       (event: any) => event.type === "review-approved" && event.number === 88,
     ),
+  ).toHaveLength(1);
+});
+
+/**
+ * Start with Reconcile polling fast, connect a display, then let `miss` change the
+ * stub's answers as a webhook GitHub could not deliver would have. Returns everything
+ * the display received after its connect snapshot, and the Feed a fresh display sees.
+ */
+async function reconcileAfter(open: unknown[], closed: unknown[], miss: () => void) {
+  const api = await stubGitHubApi(onlyProjectsApp(open, closed));
+  running = await startServer(0, {
+    configPath,
+    now: () => NOW,
+    githubApiBase: api.base,
+    reconcileMs: 10,
+  });
+  const { ws, messages } = await connectedDisplay(running.port);
+  miss();
+  await sleep(100);
+  ws.close();
+  return {
+    // Anything but a snapshot here would be a replayed event: a sound or a takeover.
+    live: messages.slice(1).filter((message) => message.type !== "snapshot"),
+    snapshots: messages.slice(1).length,
+    feed: (await connectAndReadSnapshot(running.port)).feed,
+  };
+}
+
+test("Reconcile recovers a missed pr-opened silently", async () => {
+  const open: unknown[] = [];
+  const { live, snapshots, feed } = await reconcileAfter(open, [], () =>
+    open.push({
+      number: 91,
+      title: "Opened while the board was unreachable",
+      created_at: ago(10 * 60_000),
+      updated_at: ago(10 * 60_000),
+      user: { login: "author-alice" },
+    }),
+  );
+
+  expect(live).toEqual([]);
+  expect(snapshots).toBeGreaterThan(0);
+  // Recorded once, however many polls saw it.
+  expect(feed).toEqual([
+    {
+      type: "pr-opened",
+      repo: "example-org/projects-app",
+      number: 91,
+      title: "Opened while the board was unreachable",
+      actor: "author-alice",
+      at: NOW - 10 * 60_000,
+    },
+  ]);
+});
+
+test("Reconcile recovers a missed pr-closed silently", async () => {
+  const closed: unknown[] = [];
+  const { live, snapshots, feed } = await reconcileAfter([], closed, () =>
+    closed.push({
+      number: 92,
+      title: "Closed while the board was unreachable",
+      created_at: ago(30 * HOUR),
+      updated_at: ago(10 * 60_000),
+      closed_at: ago(10 * 60_000),
+      merged_at: null,
+      user: { login: "author-alice" },
+    }),
+  );
+
+  expect(live).toEqual([]);
+  expect(snapshots).toBeGreaterThan(0);
+  expect(feed).toEqual([
+    {
+      type: "pr-closed",
+      repo: "example-org/projects-app",
+      number: 92,
+      title: "Closed while the board was unreachable",
+      actor: "author-alice",
+      at: NOW - 10 * 60_000,
+    },
+  ]);
+});
+
+test("Reconcile does not re-record Sunday's events when the dedup week rolls over at Monday midnight", async () => {
+  // Derived from local midnight so it holds in any timezone.
+  const MONDAY = new Date(Date.parse("2026-08-24T17:00:00Z")).setHours(0, 0, 0, 0);
+  const sunday = new Date(MONDAY - HOUR).toISOString();
+  const api = await stubGitHubApi(
+    onlyProjectsApp(
+      [],
+      [{ number: 9, title: "Merged on Sunday", updated_at: sunday, merged_at: sunday }],
+    ),
+  );
+  let clock = MONDAY - 10 * 60_000;
+  running = await startServer(0, {
+    configPath,
+    now: () => clock,
+    githubApiBase: api.base,
+    reconcileMs: 10,
+  });
+  await sleep(50);
+
+  // Midnight forgets last week's dedup keys; the merge is still inside the 24h Feed.
+  clock = MONDAY + 10 * 60_000;
+  await sleep(100);
+
+  expect(
+    (await connectAndReadSnapshot(running.port)).feed.filter((event: any) => event.number === 9),
   ).toHaveLength(1);
 });
 

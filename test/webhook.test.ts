@@ -281,14 +281,24 @@ test("a display connecting receives a snapshot of the Feed reflecting earlier ev
     type: "snapshot",
     // Hubot and Carl have one event each today; hubot's landed first.
     mvp: { names: ["hubot"], count: 1 },
-    // #42 was merged, never seen open, so nothing is in flight.
-    openPrs: [],
     // No deploy webhook has landed, so the header names nobody in dev.
     devDeploy: null,
     // No Target Hit today, so the board wears its usual theme.
     theme: "kernel",
     // No clip assigned to any slot, so the board plays its defaults.
     sounds: {},
+    // A test reaches no status page, so every row reads UNAVAILABLE, fresh at boot.
+    status: {
+      fetchedAt: new Date(IN_THE_SOUND_WINDOW).toISOString(),
+      services: ["GITHUB", "SENTRY", "GCP"].map((name) => ({
+        name,
+        level: "unknown",
+        text: "UNAVAILABLE",
+      })),
+      stale: false,
+    },
+    // No PostHog credential in a test, so no WUU panel.
+    wau: null,
     // Snapshot entries carry the server timestamp they were recorded at, so a
     // display can expire them itself rather than restamping them on receipt.
     feed: [
@@ -312,27 +322,7 @@ test("a display connecting receives a snapshot of the Feed reflecting earlier ev
   });
 });
 
-test("an opened PR stays on the board as state until it is merged", async () => {
-  running = await start();
-
-  await postWebhook(running.port, { body: withPullRequest({ action: "opened" }) });
-  const inFlight = await connectAndReadSnapshot(running.port);
-  await postWebhook(running.port);
-  const afterMerge = await connectAndReadSnapshot(running.port);
-
-  // An in-flight PR carries its author, so the board can show whose it is.
-  expect(inFlight.openPrs).toEqual([
-    {
-      repo: "example-org/projects-app",
-      number: 42,
-      title: "Add arcade scene renderer",
-      actor: "octocat",
-    },
-  ]);
-  expect(afterMerge.openPrs).toEqual([]);
-});
-
-test("a pr-opened delivery reaches a connected display's in-flight list without a reconnect", async () => {
+test("a pr-opened delivery reaches a connected display's Feed without a reconnect", async () => {
   running = await start();
   const { ws, messages } = await connectedDisplay(running.port);
 
@@ -340,12 +330,14 @@ test("a pr-opened delivery reaches a connected display's in-flight list without 
   await sleep(50);
   ws.close();
 
-  expect(messages.at(-1).openPrs).toEqual([
+  expect(messages.at(-1).feed).toEqual([
     {
+      type: "pr-opened",
       repo: "example-org/projects-app",
       number: 42,
       title: "Add arcade scene renderer",
       actor: "octocat",
+      at: IN_THE_SOUND_WINDOW,
     },
   ]);
 });

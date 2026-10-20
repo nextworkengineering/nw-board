@@ -102,8 +102,9 @@ test("a proxied request (Funnel adds X-Forwarded-For) cannot touch the Theme", a
 test("a Target Hit overrides a hand-set Theme, and midnight returns config.theme in one snapshot", async () => {
   // config.theme is arcade so the hand-set kernel is the odd one out: the Target Hit
   // must replace it, and midnight must not bring it back.
-  let clock = thursdayAt(23, 30);
-  running = await startServer(0, { configPath: config("arcade"), now: () => clock, tickMs: 10 });
+  // 10 ms short of midnight: the scheduler re-arms for what is left until the clock moves.
+  let clock = thursdayAt(24) - 10;
+  running = await startServer(0, { configPath: config("arcade"), now: () => clock });
   await call("POST", "/theme?name=kernel");
   const { ws, messages } = await connectedDisplay(running.port);
   await sleep(50);
@@ -117,8 +118,8 @@ test("a Target Hit overrides a hand-set Theme, and midnight returns config.theme
 });
 
 test("a hand-set Theme comes off at local midnight", async () => {
-  let clock = thursdayAt(23, 30);
-  running = await startServer(0, { configPath: config(), now: () => clock, tickMs: 10 });
+  let clock = thursdayAt(24) - 10;
+  running = await startServer(0, { configPath: config(), now: () => clock });
   await call("POST", "/theme?name=arcade");
   const { ws, messages } = await connectedDisplay(running.port);
   await sleep(50);
