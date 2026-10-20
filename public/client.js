@@ -63,6 +63,8 @@ const face = (name, fontSize, em = 0, extra) =>
 // themes keep the full-width board.
 const SHADOW = T.decorations.hardShadow ?? 0;
 const PANEL_W = SHADOW ? 1864 : 1872;
+// The Feed gives up its right-hand 316px to the Status panel: 300 wide, 16 apart.
+const FEED_W = PANEL_W - 316;
 const chips = T.decorations.chips;
 
 const EVENTS = {
@@ -646,15 +648,16 @@ const FEED_ROWS = 7;
 const ROW_Y = SHADOW ? 80 : 84;
 const ROW_PITCH = SHADOW ? 52 : 54;
 const feedHeader = T.decorations.headers?.feed;
-const feedPanel = panel(24, 204, PANEL_W, SHADOW ? 464 : 496, "LIVE FEED // LAST 24H", C.ink, feedHeader);
+const FEED_H = SHADOW ? 464 : 496;
+const feedPanel = panel(24, 204, FEED_W, FEED_H, "LIVE FEED // LAST 24H", C.ink, feedHeader);
 
 // Wall clock on the feed header — the board doubles as the office clock.
 const wallClock = label("", feedHeader?.size ?? 34, feedHeader?.ink ?? C.ink, feedHeader && face("display", feedHeader.size));
 wallClock.anchor.set(1, 0);
-wallClock.position.set(1852, 12);
+wallClock.position.set(FEED_W - 20, 12);
 if (feedHeader) {
   wallClock.anchor.set(1, 0.5);
-  wallClock.position.set(PANEL_W - 27, feedHeader.bar / 2);
+  wallClock.position.set(FEED_W - 27, feedHeader.bar / 2);
 }
 feedPanel.addChild(wallClock);
 setInterval(() => {
@@ -667,10 +670,10 @@ setInterval(() => {
 // "who put that on dev?" without anyone opening GitHub.
 const devDeployLabel = label("", chips ? 26 : 34, chips ? C.ink : C.green, face("display", 26, 0, { lineHeight: 32 }));
 devDeployLabel.anchor.set(0.5, 0);
-devDeployLabel.position.set(936, 12);
+devDeployLabel.position.set(FEED_W / 2, 12);
 if (feedHeader) {
   devDeployLabel.anchor.set(0.5);
-  devDeployLabel.position.set(PANEL_W / 2, feedHeader.bar / 2);
+  devDeployLabel.position.set(FEED_W / 2, feedHeader.bar / 2);
 }
 const devDeployChip = new Graphics();
 feedPanel.addChild(devDeployChip, devDeployLabel);
@@ -734,6 +737,93 @@ const feedRows = Array.from({ length: FEED_ROWS }, (_, i) => {
   feedPanel.addChild(row);
   return { row, icon, kindChip, kind, who, time, pillBg, pillText, pill, title, key: null };
 });
+
+// --------------------------------------------------------------------------------
+// Service Status: GitHub, Sentry and GCP lights, right of the Feed.
+// --------------------------------------------------------------------------------
+
+const statusHeader = T.decorations.headers?.status;
+const statusPanel = panel(24 + FEED_W + 16, 204, 300, FEED_H, "STATUS", C.ink, statusHeader);
+// Neobrutal: Paper's 27px inset, like the heading; elsewhere the heading's 20.
+const STATUS_INSET = statusHeader ? 27 : 20;
+// Light-top to text-bottom of one row; the rows share the body's slack equally.
+const STATUS_ROW_H = 64;
+const statusBar = statusHeader?.bar ?? 56;
+const statusGap = (FEED_H - statusBar - 3 * STATUS_ROW_H) / 4;
+const STATUS_TEXT_W = 300 - 2 * STATUS_INSET;
+const statusRows = ["GITHUB", "SENTRY", "GCP"].map((name, i) => {
+  const y = statusBar + statusGap * (i + 1) + STATUS_ROW_H * i;
+  const light = new Graphics();
+  light.position.set(STATUS_INSET + 16, y + 16);
+  const title = label(name, 30, C.ink, face("display", 30, -0.01));
+  title.anchor.set(0, 0.5);
+  title.position.set(STATUS_INSET + 32 + 14, y + 16);
+  const text = label("", 20, C.dim, face("ui", 20, 0, { lineHeight: 24 }));
+  text.anchor.set(0, 0.5);
+  text.position.set(STATUS_INSET, y + 53);
+  // Text too long for the panel scrolls inside this window rather than being cut.
+  const scrollWindow = new Graphics().rect(STATUS_INSET, y + 39, STATUS_TEXT_W, 28).fill(C.white);
+  text.mask = scrollWindow;
+  statusPanel.addChild(light, title, text, scrollWindow);
+  return { name, light, text, full: null, loop: 0 };
+});
+const STATUS_LIGHT = { ok: C.green, minor: C.amber, major: C.red, unknown: C.dim };
+// Neobrutal's canary text would vanish on its white panel, so minor reads in ink.
+const STATUS_INK = { ok: C.dim, minor: chips ? C.ink : C.amber, major: C.red, unknown: C.dim };
+
+let latestStatus = null;
+/**
+ * Text that fits sits still. Longer text runs as a loop, `full • full`, that steps
+ * left one whole pixel per 60Hz frame like the ticker; `loop` is one lap's width.
+ * Unchanged text keeps its place, so a refresh doesn't jump the scroll back.
+ */
+function setStatusText(row, full) {
+  if (row.full === full) return;
+  row.full = full;
+  row.loop = 0;
+  row.text.x = STATUS_INSET;
+  row.text.text = full;
+  if (row.text.width <= STATUS_TEXT_W) return;
+  row.text.text = `${full}   •   `;
+  row.loop = Math.round(row.text.width);
+  row.text.text = `${full}   •   ${full}`;
+}
+app.ticker.add((t) => {
+  const frames = Math.max(1, Math.round(t.deltaMS / (1000 / 60)));
+  for (const row of statusRows) {
+    if (!row.loop) continue;
+    row.text.x -= frames;
+    if (row.text.x <= STATUS_INSET - row.loop) row.text.x += row.loop;
+  }
+});
+
+/** Stale data keeps its words but dims every light: a light is a claim about now. */
+function renderStatus(data, stale = false) {
+  latestStatus = data;
+  for (const row of statusRows) {
+    const { name, light, text } = row;
+    const service = data?.services?.find((entry) => entry.name === name);
+    const level = Object.hasOwn(STATUS_LIGHT, service?.level ?? "") ? service.level : "unknown";
+    light.clear().circle(0, 0, 16).fill(stale || !service ? C.dim : STATUS_LIGHT[level]);
+    if (T.decorations.stats) light.stroke({ width: T.decorations.stats.outline, color: C.ink, alignment: 1 });
+    text.style.fill = service ? STATUS_INK[level] : C.dim;
+    setStatusText(row, service ? String(service.text) : "CHECKING…");
+  }
+}
+
+const STATUS_REFRESH_MS = 2 * 60 * 1000;
+async function loadStatus() {
+  try {
+    const response = await fetch("/status.json", { cache: "no-store" });
+    if (!response.ok) throw new Error(`status returned ${response.status}`);
+    const next = await response.json();
+    if (!Array.isArray(next.services)) throw new Error("invalid status data");
+    renderStatus(next, Date.now() - Date.parse(next.fetchedAt) > 2 * STATUS_REFRESH_MS);
+  } catch (error) {
+    console.warn(error);
+    renderStatus(latestStatus, latestStatus !== null);
+  }
+}
 
 // --------------------------------------------------------------------------------
 // Weekly Unique User Growth: four dashboard KPIs and new WUU per day for this week vs last week.
@@ -1173,7 +1263,7 @@ function retextRow({ icon, kindChip, kind, who, time, pillBg, pillText, pill, ti
       .stroke({ color: C.dim, alpha: 0.7, width: 1.5 });
   // Title starts just past the pill and runs to the panel edge.
   title.position.x = pill.position.x + pillWidth + (chips ? 24 : 14);
-  fitText(title, `#${entry.number}  ${entry.title}`, PANEL_W - (chips ? 62 : 44) - title.position.x);
+  fitText(title, `#${entry.number}  ${entry.title}`, FEED_W - (chips ? 62 : 44) - title.position.x);
 }
 
 // An idle board still has to age entries out; a minute of granularity is plenty.
@@ -1987,10 +2077,11 @@ function prOpenedAnimation() {
 function prClosedAnimation() {
   const scene = new Container();
   const crate = pixelSprite("crate", 9, C.red);
-  crate.position.set(1540, 320);
+  // Inside the Feed's right edge, so the drift never crosses the Status panel.
+  crate.position.set(FEED_W - 80, 320);
   scene.addChild(crate);
   ambientScene(scene, 1400, (progress, elapsed) => {
-    crate.x = 1540 + progress * 60;
+    crate.x = FEED_W - 80 + progress * 60;
     crate.y = 320 + progress * progress * 900;
     crate.rotation = progress * 3;
     crate.alpha = 1 - progress * 0.6;
@@ -2302,10 +2393,13 @@ connect();
 
 renderFeed();
 renderWau(null);
+renderStatus(null);
 renderHeadlines([]);
 void loadWau();
+void loadStatus();
 void loadHeadlines();
 setInterval(() => void loadWau(), WAU_REFRESH_MS);
+setInterval(() => void loadStatus(), STATUS_REFRESH_MS);
 setInterval(() => void loadHeadlines(), NEWS_REFRESH_MS);
 
 // The Target Hit that switched this page into the Arcade Theme plays now.
@@ -2326,6 +2420,8 @@ playHeldCelebration();
 //   arcade.setDevDeploy({actor:"Maximus"}) / arcade.setDevDeploy(null) — feed header
 //   arcade.setWau() / arcade.setWau(undefined, true) / arcade.setWau(null, true)
 //     — sample success / stale / unavailable WUU states
+//   arcade.setStatus({fetchedAt, services:[{name:"GITHUB", level:"minor", text:"..."}]})
+//     / arcade.setStatus(null) — Status panel lights, (data, true) for stale
 //   arcade.setHeadlines(["A very important AI headline"]) — bottom news ticker
 //   ?theme=arcade — load in a theme from public/themes (arcade is the pre-reskin
 //     look a Target Hit puts on until midnight); the server's snapshot `theme`
@@ -2378,6 +2474,7 @@ window.arcade = {
   setMvp,
   setDevDeploy,
   setWau: (data, stale = false) => renderWau(data === undefined ? sampleWau : data, stale),
+  setStatus: renderStatus,
   setHeadlines: renderHeadlines,
   event: handleMessage,
   demo() {

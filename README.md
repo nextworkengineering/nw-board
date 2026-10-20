@@ -22,6 +22,8 @@ GITHUB_WEBHOOK_SECRET=dev npm start   # http://localhost:3000
   board fills from live webhooks only.
 - `POSTHOG_PERSONAL_API_KEY` enables the Weekly Unique User Growth Tracker. Without it,
   the rest of the board runs and the WUU panel shows its retrying state.
+- The STATUS panel beside the Live Feed needs no key: the server reads GitHub,
+  Sentry and GCP's public status pages for it at `/status.json`.
 - `PORT` defaults to 3000.
 - Real webhook deliveries need a public URL; production uses Tailscale Funnel.
   To fake an event locally, POST a signed payload to `/webhook` (see

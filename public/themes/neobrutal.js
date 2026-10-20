@@ -76,6 +76,8 @@ export default {
     headers: {
       feed: { fill: KERNEL["accent-cornflower"], ink: KERNEL["white"], size: 32, bar: 62.5 },
       wau: { fill: KERNEL["accent-emerald"], ink: INK, size: 30, bar: 58.5 },
+      // Same bar as the Feed's, so the two headers side by side line up.
+      status: { fill: KERNEL["accent-plum"], ink: KERNEL["white"], size: 32, bar: 62.5 },
     },
     // Event names, IN DEV, repo pills, the MVP tally and the takeover credit as
     // filled stickers. Ink text on every fill except these darker ones.
