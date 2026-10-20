@@ -6,7 +6,6 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
-  renameSync,
   rmSync,
   unlinkSync,
   writeFileSync,
@@ -22,7 +21,8 @@ import { createHistory, login, type DomainEvent, type Happening } from "./backfi
 import { createBoard } from "./board.ts";
 import { cycleDay } from "./clock.ts";
 import { createMonitor, type Reading } from "./monitor.ts";
-import { createScheduler, dueAt, type Schedule } from "./scheduler.ts";
+import { createScheduler, dueAt } from "./scheduler.ts";
+import { createSettings, invalid, isTheme, minutesOfDay, THEMES_DIR } from "./settings.ts";
 import { statusReader, type ServiceStatus } from "./status.ts";
 import { limitedText } from "./upstream.ts";
 import { wauPayload, wauReader } from "./wau.ts";
@@ -91,65 +91,6 @@ const CELEBRATIONS = new Set(["pr-merged", "review-approved"]);
  */
 const SOUNDED = new Set([...CELEBRATIONS, "pr-opened"]);
 
-/**
- * A complaint about config, whether it came from config.json at boot or from an
- * Admin Console write. The status is what the admin API answers with; at boot it
- * is ignored and the server simply refuses to start.
- */
-const invalid = (complaint: string) => Object.assign(new Error(complaint), { status: 400 });
-
-/** "09:00" -> 540 minutes past local midnight. Anything else is a config error. */
-function minutesOfDay(value: unknown, complaint: string) {
-  // A string check, not String(value): ["09:00"] would otherwise pass and be saved.
-  const match = typeof value === "string" && /^([01]\d|2[0-3]):([0-5]\d)$/.exec(value);
-  if (!match) throw invalid(complaint);
-  return Number(match[1]) * 60 + Number(match[2]);
-}
-
-// The live-editable settings, checked identically at boot and on PUT /api/settings,
-// so nothing the Admin Console saves can stop the next boot.
-
-/** Quiet Hours: sound is allowed on weekdays between these two local times only. */
-function parseQuietHours(value: any) {
-  const complaint = `quietHours must be {"soundStart":"HH:MM","soundEnd":"HH:MM"}`;
-  minutesOfDay(value?.soundStart, complaint);
-  minutesOfDay(value?.soundEnd, complaint);
-  return { soundStart: value.soundStart as string, soundEnd: value.soundEnd as string };
-}
-
-/** Day Chimes: local times, weekdays only. */
-function parseChimes(value: unknown) {
-  const complaint = `chimes must be a list of "HH:MM"`;
-  if (!Array.isArray(value)) throw invalid(complaint);
-  for (const chime of value) minutesOfDay(chime, complaint);
-  return value as string[];
-}
-
-/**
- * Team member names: GitHub login -> first name shown on the board. Optional;
- * an unmapped login displays as-is, so absence is a cosmetic gap, not an error.
- */
-function parseNames(value: unknown = {}) {
-  if (typeof value !== "object" || value === null || Array.isArray(value))
-    throw invalid(`names must be {"<login>": "<first name>"}`);
-  for (const [key, name] of Object.entries(value))
-    if (typeof name !== "string") throw invalid(`names.${key} must be a string`);
-  return value as Record<string, string>;
-}
-
-/**
- * The slots a clip can be assigned to — the board's SAMPLES keys in public/audio.js.
- * An unassigned slot plays the client's built-in default.
- */
-const SLOTS = [
-  "pr-merged",
-  "review-approved",
-  "pr-opened",
-  "day-start",
-  "day-chime",
-  "wau-target-hit",
-];
-
 /** A Sound Library file name. The pattern is also what keeps a name inside its directory. */
 const SOUND_NAME = /^[a-z0-9-]+\.mp3$/;
 
@@ -192,17 +133,6 @@ async function normalizeSound(src: string, dest: string) {
   return stdout + stderr;
 }
 
-/**
- * A Theme — the board's whole look — is a file in public/themes/. The pattern keeps
- * a name from walking out of the directory; index.js is the loader, not a look.
- */
-const THEMES_DIR = fileURLToPath(new URL("../public/themes/", import.meta.url));
-const isTheme = (name: unknown): name is string =>
-  typeof name === "string" &&
-  /^[a-z0-9-]+$/.test(name) &&
-  name !== "index" &&
-  existsSync(`${THEMES_DIR}${name}.js`);
-
 export async function startServer(port: number, options: Options = {}) {
   const secret = process.env.GITHUB_WEBHOOK_SECRET;
   if (!secret) throw new Error("GITHUB_WEBHOOK_SECRET is not set");
@@ -214,18 +144,6 @@ export async function startServer(port: number, options: Options = {}) {
   // A missing list would 400 every delivery; a bare string would match repos by substring.
   if (!Array.isArray(trackedRepos))
     throw new Error(`${configPath}: trackedRepos must be a list of "owner/name"`);
-
-  /** Run a settings check at boot, naming the file in its complaint. */
-  const fromConfig = <T>(parse: () => T) => {
-    try {
-      return parse();
-    } catch (error) {
-      throw new Error(`${configPath}: ${(error as Error).message}`);
-    }
-  };
-
-  // Live-editable from the Admin Console, hence `let`: every reader goes through these.
-  let names = fromConfig(() => parseNames(config.names));
 
   // The dev deploy workflow, as its file name (e.g. "env-dev.yaml"). Optional: with
   // no workflow configured the board simply never names a dev deployer.
@@ -250,9 +168,6 @@ export async function startServer(port: number, options: Options = {}) {
       throw new Error(complaint);
   }
 
-  let quietHours = fromConfig(() => parseQuietHours(config.quietHours));
-  let chimes = fromConfig(() => parseChimes(config.chimes));
-
   // The Sound Library: the committed clips in public/sounds/ (read-only) plus what the
   // Admin Console uploaded into public/sounds/uploads/ (gitignored, deletable). A path
   // is relative to public/sounds/, which is also where the board fetches it from.
@@ -273,91 +188,17 @@ export async function startServer(port: number, options: Options = {}) {
   // An allow-list read off the disk, so no path can name anything outside it.
   const inLibrary = (path: unknown) => typeof path === "string" && library().includes(path);
 
-  // At boot (`boot` true) a path missing from the disk — a clip deleted by hand while
-  // assigned — only warns and is dropped: a throw there would be a systemd restart loop.
-  // An Admin Console write still 400s on it, so a typo never gets saved.
-  const missing = (boot: boolean, path: unknown, complaint: string) => {
-    if (!boot || typeof path !== "string") throw invalid(complaint);
-    console.warn(`${configPath}: ${complaint}, ignoring it`);
-  };
-
-  /** slot -> library path. Every value is checked against the disk, so a typo 400s. */
-  const parseSlots = (value: unknown, boot = false) => {
-    if (typeof value !== "object" || value === null || Array.isArray(value))
-      throw invalid(`sounds must be {"<slot>": "<library path>"}`);
-    const slots: Record<string, string | null> = {};
-    for (const [slot, path] of Object.entries(value)) {
-      if (!SLOTS.includes(slot)) throw invalid(`sounds: ${slot} is not one of ${SLOTS.join(", ")}`);
-      if (path !== null && !inLibrary(path))
-        missing(boot, path, `sounds.${slot}: ${path} is not in the Sound Library`);
-      else slots[slot] = path;
-    }
-    return slots;
-  };
-
-  // Every tick scans the whole list and every save logs it, so keep it a list a person
-  // could have typed. Only a hand-edit can exceed it at boot, which keeps the first 100.
-  const MAX_SCHEDULES = 100;
-
-  /** Reminders and Scheduled Celebrations, normalized to exactly the fields the board uses. */
-  const parseSchedules = (value: unknown, boot = false): Schedule[] => {
-    if (!Array.isArray(value)) throw invalid("schedules must be a list");
-    if (value.length > MAX_SCHEDULES) {
-      if (!boot) throw invalid(`at most ${MAX_SCHEDULES} schedules`);
-      console.warn(`${configPath}: more than ${MAX_SCHEDULES} schedules, keeping the first ${MAX_SCHEDULES}`);
-      value = value.slice(0, MAX_SCHEDULES);
-    }
-    const ids = new Set<string>();
-    return (value as unknown[]).map((item: any, index): Schedule => {
-      const bad = (complaint: string) => invalid(`schedules[${index}]: ${complaint}`);
-      if (typeof item !== "object" || item === null) throw bad("must be an object");
-      let { id, kind, text, sound = null, time, date, days } = item;
-      if (typeof id !== "string" || !id || ids.has(id)) throw bad("id must be a unique non-empty string");
-      ids.add(id);
-      if (kind !== "reminder" && kind !== "celebration")
-        throw bad(`kind must be "reminder" or "celebration"`);
-      if (typeof text !== "string" || !text.trim() || text.length > 120)
-        throw bad("text must be 1-120 characters");
-      if (sound !== null && !inLibrary(sound)) {
-        missing(boot, sound, `schedules[${index}]: ${sound} is not in the Sound Library`);
-        sound = null;
-      }
-      minutesOfDay(time, `schedules[${index}]: time must be "HH:MM"`);
-      const base = { id, kind, text, sound, time };
-      if ((date === undefined) === (days === undefined))
-        throw bad("needs exactly one of date (one-off) or days (weekly)");
-      if (date !== undefined) {
-        if (typeof date !== "string" || !/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(date))
-          throw bad(`date must be "YYYY-MM-DD"`);
-        return { ...base, date };
-      }
-      if (
-        !Array.isArray(days) ||
-        !days.length ||
-        new Set(days).size !== days.length ||
-        !days.every((day) => Number.isInteger(day) && day >= 0 && day <= 6)
-      )
-        throw bad("days must be distinct weekdays 0 (Sunday) to 6");
-      return { ...base, days };
-    });
-  };
-
-  // Optional, since existing Pi configs predate the Admin Console. Checked at boot like
-  // the rest, except that a hand-deleted clip still assigned somewhere only warns.
-  const assigned = (slots: Record<string, string | null>) =>
-    Object.fromEntries(Object.entries(slots).filter(([, path]) => path !== null)) as Record<
-      string,
-      string
-    >;
-  let soundSlots = assigned(fromConfig(() => parseSlots(config.sounds ?? {}, true)));
-  let schedules = fromConfig(() => parseSchedules(config.schedules ?? [], true));
-
-  // The Theme the board wears when nothing live overrides it. Optional: existing Pi
-  // installs keep config.json across deploys, and they wore kernel before this key.
-  // A POST /theme?name=<name>&permanent rewrites the file and the board's default.
-  const defaultTheme: string = config.theme ?? "kernel";
-  if (!isTheme(defaultTheme))
-    throw new Error(`${configPath}: theme must name a file in public/themes/, e.g. "kernel"`);
+  // Theme, Quiet Hours, Day Chimes, names, sound slots and schedules: checked here at
+  // boot and on every Admin Console write by the same Settings Store, which is also the
+  // only writer of config.json. Each write is told to Board State, which pushes a
+  // fresh snapshot; a permanent Theme is the new default, worn at once.
+  const settings = createSettings({
+    configPath,
+    config,
+    inLibrary,
+    onApply: ({ theme }) =>
+      theme !== undefined ? board.setTheme(theme, { permanent: true }) : board.settingsChanged(),
+  });
 
   const now = options.now ?? Date.now;
   const isWeekday = (at: Date) => at.getDay() >= 1 && at.getDay() <= 5;
@@ -366,14 +207,18 @@ export async function startServer(port: number, options: Options = {}) {
     const minute = at.getHours() * 60 + at.getMinutes();
     return (
       isWeekday(at) &&
-      minute >= minutesOfDay(quietHours.soundStart, "") &&
-      minute < minutesOfDay(quietHours.soundEnd, "")
+      minute >= minutesOfDay(settings.current().quietHours.soundStart, "") &&
+      minute < minutesOfDay(settings.current().quietHours.soundEnd, "")
     );
   };
 
   // Board State: the Feed, today's MVP, In Dev and the Theme. Displays hear of every
   // change through its onChange, wired to the one snapshot push below.
-  const board = createBoard({ now, names: () => names, theme: defaultTheme });
+  const board = createBoard({
+    now,
+    names: () => settings.current().names,
+    theme: settings.current().theme,
+  });
   const HOUR_MS = 60 * 60 * 1000;
 
   /**
@@ -511,22 +356,10 @@ export async function startServer(port: number, options: Options = {}) {
     else next();
   };
 
-  /**
-   * Every config write — a permanent Theme, an Admin Console save — goes through here.
-   * Re-read rather than reuse `config`: the operator may have edited the file since
-   * boot. Write-then-rename so a crash mid-write leaves the old file whole. All sync,
-   * so two writes in flight cannot interleave and lose each other's keys.
-   */
-  const saveConfig = (patch: Record<string, unknown>) => {
-    const onDisk = JSON.parse(readFileSync(configPath, "utf8"));
-    writeFileSync(`${configPath}.tmp`, JSON.stringify({ ...onDisk, ...patch }, null, 2) + "\n");
-    renameSync(`${configPath}.tmp`, configPath);
-  };
-
   /** Wear `name` until local midnight, or make it config.theme for good. Throws if the save fails. */
   const setTheme = (name: string, permanent: boolean) => {
-    if (permanent) saveConfig({ theme: name });
-    board.setTheme(name, { permanent });
+    if (permanent) settings.patch({ theme: name });
+    else board.setTheme(name);
   };
 
   /** Replays the Target Hit on demand, with today's row from the last WUU reading. */
@@ -607,9 +440,10 @@ export async function startServer(port: number, options: Options = {}) {
   //               read lands (wau stays null without a PostHog credential), as below.
   //               Each change is pushed as a fresh snapshot.
   //   live:       <domain event> = {"type":"pr-merged"|..., repo, number, title, actor}
-  //               actor is the GitHub login of whoever did it (the merger for a
-  //               pr-merged, the reviewer for a review, the commenter for a comment),
-  //               always a string — "" when GitHub named nobody.
+  //               actor is the display name of whoever did it (the merger for a
+  //               pr-merged, the reviewer for a review, the commenter for a comment):
+  //               the names map's first name for their GitHub login, the login as-is
+  //               when it has no mapping. Always a string — "" when GitHub named nobody.
   //               Events that make a sound — the Celebrations plus pr-opened — carry
   //               "audible": true|false — Quiet Hours decided at delivery time — and
   //               "teammate": true|false, whether the actor's login is in the names
@@ -657,7 +491,7 @@ export async function startServer(port: number, options: Options = {}) {
     type: "snapshot",
     ...board.snapshot(),
     sounds: Object.fromEntries(
-      Object.entries(soundSlots).map(([slot, path]) => [slot, `sounds/${path}`]),
+      Object.entries(settings.current().sounds).map(([slot, path]) => [slot, `sounds/${path}`]),
     ),
     status: statusBody(),
     wau: wauPayload(wauMonitor?.current()),
@@ -818,7 +652,7 @@ export async function startServer(port: number, options: Options = {}) {
       // Checked against the login, not the display name the board shows: the map is
       // the roster, so an unmapped login (a bot, an outside contributor) is not
       // someone we play a sample for.
-      const teammate = Object.hasOwn(names, event.actor);
+      const teammate = Object.hasOwn(settings.current().names, event.actor);
       // Read once: the broadcast below must not re-ask a clock that may have ticked
       // past soundEnd since this line, or the log and the board disagree.
       const audible = soundAllowed();
@@ -881,11 +715,11 @@ export async function startServer(port: number, options: Options = {}) {
           .filter(isTheme)
           .sort(),
       },
-      quietHours,
-      chimes,
-      names,
-      sounds: { slots: soundSlots, library: library() },
-      schedules,
+      quietHours: settings.current().quietHours,
+      chimes: settings.current().chimes,
+      names: settings.current().names,
+      sounds: { slots: settings.current().sounds, library: library() },
+      schedules: settings.current().schedules,
     });
   });
 
@@ -909,17 +743,13 @@ export async function startServer(port: number, options: Options = {}) {
   // Any subset of the three; each one present replaces its whole value. All are checked
   // before any is saved, so a bad field leaves the file and the board as they were.
   admin.put("/api/settings", (req, res) => {
-    const body = req.body ?? {};
-    const patch: Record<string, unknown> = {};
-    if (body.quietHours !== undefined) patch.quietHours = parseQuietHours(body.quietHours);
-    if (body.chimes !== undefined) patch.chimes = parseChimes(body.chimes);
-    if (body.names !== undefined) patch.names = parseNames(body.names);
+    const { quietHours, chimes, names } = req.body ?? {};
+    const patch = Object.fromEntries(
+      Object.entries({ quietHours, chimes, names }).filter(([, value]) => value !== undefined),
+    );
     if (!Object.keys(patch).length) throw invalid("expected some of {quietHours, chimes, names}");
-    saveConfig(patch);
-    quietHours = (patch.quietHours as typeof quietHours) ?? quietHours;
-    chimes = (patch.chimes as string[]) ?? chimes;
-    names = (patch.names as typeof names) ?? names;
-    audit(req, `settings ${JSON.stringify(patch)}`);
+    // Logged as saved, normalized: what config.json now says.
+    audit(req, `settings ${JSON.stringify(settings.patch(patch))}`);
     res.sendStatus(204);
   });
 
@@ -985,8 +815,9 @@ export async function startServer(port: number, options: Options = {}) {
     const { name } = req.params;
     if (!SOUND_NAME.test(name)) throw invalid("not a Sound Library name");
     const path = `uploads/${name}`;
+    const { sounds, schedules } = settings.current();
     const users = [
-      ...Object.keys(soundSlots).filter((slot) => soundSlots[slot] === path),
+      ...Object.keys(sounds).filter((slot) => sounds[slot] === path),
       ...schedules.filter((schedule) => schedule.sound === path).map(({ id }) => `schedule ${id}`),
     ];
     if (users.length) {
@@ -1004,21 +835,16 @@ export async function startServer(port: number, options: Options = {}) {
 
   // A patch: each slot named is assigned (a path) or put back to its default (null).
   admin.put("/api/sound-slots", (req, res) => {
-    const slots = assigned({ ...soundSlots, ...parseSlots(req.body) });
-    saveConfig({ sounds: slots });
-    soundSlots = slots;
+    settings.patch({ sounds: req.body });
     audit(req, `sound slots ${JSON.stringify(req.body)}`);
-    // Not Board State, but the snapshot carries it.
-    pushSnapshot();
     res.sendStatus(204);
   });
 
   // The whole list, replaced: an edit is the client changing its copy and sending it back.
   admin.put("/api/schedules", (req, res) => {
-    const next = parseSchedules(req.body);
-    saveConfig({ schedules: next });
-    schedules = next;
-    audit(req, `schedules (${next.length}) ${JSON.stringify(next)}`);
+    settings.patch({ schedules: req.body });
+    const { schedules } = settings.current();
+    audit(req, `schedules (${schedules.length}) ${JSON.stringify(schedules)}`);
     res.sendStatus(204);
   });
 
@@ -1081,6 +907,7 @@ export async function startServer(port: number, options: Options = {}) {
     onMidnight: () => board.rollover(),
     onMinute: (at) => {
       board.expireTheme();
+      const { chimes, schedules } = settings.current();
       const { chime, schedules: due } = dueAt(at, chimes, schedules);
       if (chime) broadcast({ type: "day-chime", ...chime });
       if (!due.length) return;

@@ -399,6 +399,32 @@ test("the theme set through the console is broadcast, and permanent rewrites con
   expect(JSON.parse(readFileSync(paths.configPath, "utf8")).theme).toBe("neobrutal");
 });
 
+test("every console write is followed by one fresh snapshot; a refused one by none", async () => {
+  await start(setup());
+  const { ws, messages } = await connectedDisplay(running!.port);
+  await sleep(50);
+
+  expect((await api("PUT", "/api/settings", { chimes: ["10:00"] })).status).toBe(204);
+  expect((await api("PUT", "/api/settings", { names: { octocat: "Octo" } })).status).toBe(204);
+  expect((await api("PUT", "/api/schedules", [reminder])).status).toBe(204);
+  expect((await api("PUT", "/api/sound-slots", { "pr-merged": "builtin.mp3" })).status).toBe(204);
+  expect((await api("PUT", "/api/settings", { chimes: "10:00" })).status).toBe(400);
+  await sleep(50);
+  ws.close();
+
+  // The connect snapshot, then one per accepted write.
+  expect(messages.map((m) => m.type)).toEqual(Array(5).fill("snapshot"));
+});
+
+test("a permanent Theme through the console takes off a live one", async () => {
+  const paths = setup();
+  await start(paths);
+  await api("POST", "/api/theme", { name: "arcade" });
+  expect((await api("POST", "/api/theme", { name: "kernel", permanent: true })).status).toBe(204);
+  expect((await state()).theme).toMatchObject({ current: "kernel", default: "kernel" });
+  expect(JSON.parse(readFileSync(paths.configPath, "utf8")).theme).toBe("kernel");
+});
+
 test("Replay Target Hit through the console takes the board over", async () => {
   await start(setup());
   const { ws, messages } = await connectedDisplay(running!.port);

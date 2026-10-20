@@ -37,6 +37,8 @@ const counts = (days: number[]) => [...days, days.reduce((a, b) => a + b, 0)];
 const thursdayWeek = (thursday: number, days: Record<number, number> = {}) =>
   counts([1000, 1001, 1002, 1003, 1004, thursday, 0].map((n, day) => days[day] ?? n));
 const LAST_WEEK = [900, 901, 902, 903, 904, 1000, 1000];
+/** The week both queries name in their 9th column: its Central Saturday midnight. */
+const WEEK_OF_13_AUGUST = "2026-08-08T00:00:00-05:00";
 
 /** Quiet Hours are local time: 13 August 2026 is a Thursday. */
 const thursdayAt = (hour: number) => new Date(2026, 7, 13, hour).getTime();
@@ -45,13 +47,14 @@ type Asked = { method?: string; url: URL; authorization?: string; body?: any };
 
 /**
  * A stub PostHog: the two HogQL queries answer from `live` / `lastWeek` (8 counts each),
- * the tiles from `target` / `activation`. Change a field and the next read sees it.
+ * then `week_start`, the week PostHog's now() is in; the tiles from `target` / `activation`. Change a field and the next read sees it.
  * `status` answers every call with that status instead (and `retryAfter` with it).
  */
 async function posthog() {
   const state = {
     live: thursdayWeek(900) as unknown[],
     lastWeek: counts(LAST_WEEK),
+    week_start: WEEK_OF_13_AUGUST as unknown,
     target: 24400 as unknown,
     activation: "4.5%" as unknown,
     status: 200,
@@ -75,7 +78,7 @@ async function posthog() {
     res.setHeader("content-type", "application/json");
     if (url.pathname === "/api/projects/196853/query/") {
       const row = asked.body.name === "board-wuu-live" ? state.live : state.lastWeek;
-      return void res.end(JSON.stringify({ columns: [], results: [row] }));
+      return void res.end(JSON.stringify({ columns: [], results: [[...row, state.week_start]] }));
     }
     const ids = url.searchParams.get("tile_ids")!.split(",").map(Number);
     const value = (id: number) => (id === 7119740 ? state.target : state.activation);
@@ -253,6 +256,7 @@ test("Saturday's first reading already ahead celebrates: the last reading was la
   await boot(ph, () => clock);
   const { ws, messages } = await connectedDisplay(running!.port);
   clock = new Date(2026, 7, 15, 10).getTime(); // Saturday: a new week
+  ph.week_start = "2026-08-15T00:00:00-05:00";
   ph.lastWeek = counts([1000, 1001, 1002, 1003, 1004, 1005, 1006]);
   await step(ph, messages, counts([1001, 0, 0, 0, 0, 0, 0]), 0);
   ws.close();
@@ -328,6 +332,7 @@ test.each([
   ["an upstream error", (ph: PostHog) => (ph.status = 503)],
   ["a query row that is not 8 counts", (ph: PostHog) => (ph.live = [1, 2, 3])],
   ["a non-numeric count", (ph: PostHog) => (ph.live = [...thursdayWeek(900).slice(0, 7), "n/a"])],
+  ["a query row with no week", (ph: PostHog) => (ph.week_start = null)],
   ["no target yet", (ph: PostHog) => (ph.target = null)],
   ["no activation rate yet", (ph: PostHog) => (ph.activation = "n/a")],
   // PostHog's Friday already counting: its week or day is not the board's.

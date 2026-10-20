@@ -181,12 +181,11 @@ export function wauReader({
       body: JSON.stringify({ query: { kind: "HogQLQuery", query: sql }, refresh: "force_blocking", name }),
     });
     const row = body?.results?.[0];
-    // The week is only ever compared with the other query's, so a row without one is
-    // let through: two such rows match, and one beside a dated row doesn't.
-    const counts = Array.isArray(row) && row.length <= 9 ? row.slice(0, 8) : [];
+    // Both queries name their week, so a row without one is not the query's answer.
+    const counts = Array.isArray(row) && row.length === 9 && typeof row[8] === "string" ? row.slice(0, 8) : [];
     if (counts.length !== 8 || !counts.every((n) => Number.isFinite(n) && n >= 0))
-      throw new Error(`PostHog ${name} is not one row of 8 counts`);
-    return { counts: counts as number[], week: row[8] as unknown };
+      throw new Error(`PostHog ${name} is not one row of 8 counts and its week`);
+    return { counts: counts as number[], week: row[8] as string };
   };
 
   const tiles = (ids: number[], refresh: string, waitMs?: number) =>
@@ -240,7 +239,7 @@ export function wauReader({
       .finally(() => (warming = false));
   };
 
-  let lastWeek: { key: string; previous: { counts: number[]; week: unknown } } | undefined;
+  let lastWeek: { key: string; previous: { counts: number[]; week: string } } | undefined;
   let last: { key: string; ahead: boolean } | undefined;
   let celebratedOn = "";
 

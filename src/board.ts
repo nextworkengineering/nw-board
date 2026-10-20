@@ -170,6 +170,12 @@ export function createBoard({
       live = null;
       changed();
     },
+    /**
+     * A Settings Store write landed (Quiet Hours, Day Chimes, names, sound slots or
+     * schedules). Told to the listeners whatever changed, so every write is followed
+     * by a fresh snapshot; a permanent Theme comes through `setTheme` instead.
+     */
+    settingsChanged: () => changed(),
     /** The Theme worn now and the default it falls back to. */
     theme: () => ({ current: currentTheme(), default: defaultTheme }),
 
