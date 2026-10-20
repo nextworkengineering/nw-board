@@ -31,5 +31,10 @@ export const startOfWeek = (at: number) => {
   return monday.getTime();
 };
 
-/** How long from `at` until the next local :00 — never 0, so a timer armed on the minute waits a whole one. */
-export const msToNextMinute = (at: number) => new Date(at).setSeconds(60, 0) - at;
+/**
+ * How long from `at` until the next local :00 — never 0, so a timer armed on the minute
+ * waits a whole one. Epoch arithmetic, unlike the days above: every UTC offset is whole
+ * minutes, and a local-time setter would aim 01:59 on the fall-back night at the one
+ * 02:00, an hour and a minute away.
+ */
+export const msToNextMinute = (at: number) => 60_000 - (at % 60_000);

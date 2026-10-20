@@ -77,4 +77,7 @@ test("msToNextMinute lands on the next :00, a whole minute away when already on 
   const from = at(2026, 3, 8, 1, 59, 12, 345);
   expect(new Date(from + msToNextMinute(from)).getSeconds()).toBe(0);
   expect(new Date(from + msToNextMinute(from)).getMilliseconds()).toBe(0);
+  // The fall-back night repeats 01:00-01:59; the minute after the first 01:59 is the
+  // second 01:00, not 02:00 an hour on.
+  expect(msToNextMinute(at(2026, 11, 1, 1, 59, 30))).toBe(30_000);
 });

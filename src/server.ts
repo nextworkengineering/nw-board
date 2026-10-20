@@ -19,8 +19,9 @@ import { promisify } from "node:util";
 import express, { type ErrorRequestHandler, type RequestHandler } from "express";
 import { WebSocketServer } from "ws";
 import { createHistory, login, type DomainEvent } from "./backfill.ts";
-import { cycleDay, localDate, nextMidnight, startOfDay, startOfWeek } from "./clock.ts";
+import { cycleDay, nextMidnight, startOfDay, startOfWeek } from "./clock.ts";
 import { createMonitor, type Reading } from "./monitor.ts";
+import { createScheduler, dueAt, type Schedule } from "./scheduler.ts";
 import { statusReader, type ServiceStatus } from "./status.ts";
 import { limitedText } from "./upstream.ts";
 import { wauPayload, wauReader } from "./wau.ts";
@@ -151,23 +152,12 @@ const SLOTS = [
 /** A Sound Library file name. The pattern is also what keeps a name inside its directory. */
 const SOUND_NAME = /^[a-z0-9-]+\.mp3$/;
 
-type Schedule = {
-  id: string;
-  kind: "reminder" | "celebration";
-  text: string;
-  /** A Sound Library path, e.g. "uploads/gong.mp3"; null plays the board's fallback jingle. */
-  sound: string | null;
-  time: string;
-} & ({ date: string } | { days: number[] });
-
 type Options = {
   /** Path to the JSON config holding the Tracked Repo list. */
   configPath?: string;
   now?: () => number;
   /** Root of the GitHub REST API; tests point this at a stub. */
   githubApiBase?: string;
-  /** How often the Day Chime scheduler checks the clock. */
-  tickMs?: number;
   /** How often to reconcile merges whose webhook could not reach the board. */
   reconcileMs?: number;
   /** How long the news-feed proxy waits for its configured upstream. */
@@ -1187,57 +1177,36 @@ export async function startServer(port: number, options: Options = {}) {
     options.reconcileMs ?? 60_000,
   );
 
-  // Day Chime and schedule scheduler: poll the clock rather than compute a delay, so the
-  // injected clock (and a Pi whose time jumps after an NTP sync) is followed rather than
-  // trusted. `lastMinute` keeps each minute's chimes and schedules to one push however
-  // many ticks land inside it; everything due in a minute fires together, so a Reminder
-  // set for 09:00 and the 09:00 chime both go out. It only moves forward: a clock stepped
-  // back stays quiet until it passes the last minute seen, rather than firing it twice,
-  // and a forward jump skips the minutes in between rather than catching up.
-  let lastMinute = -Infinity;
-  let mvpDay = startOfDay(now());
-  const scheduler = setInterval(() => {
-    const at = new Date(now());
-    // The MVP is derived on read, so a display connected across local midnight would
-    // keep yesterday's leader until something else happened. Remembering the day we
-    // last pushed is what keeps this to one broadcast rather than one per tick.
-    // A live Theme ends at that same midnight; checked on its own so a clock that
-    // jumps doesn't strand it, and folded into the one push so the rollover stays one.
-    const liveOver = live !== null && at.getTime() >= live.until;
-    if (startOfDay(at.getTime()) !== mvpDay || liveOver) {
-      mvpDay = startOfDay(at.getTime());
-      if (liveOver) live = null;
-      broadcast(snapshot());
-    }
-    const hhmm = `${at.getHours()}`.padStart(2, "0") + ":" + `${at.getMinutes()}`.padStart(2, "0");
-    const minute = Math.floor(at.getTime() / 60_000);
-    if (minute <= lastMinute) return;
-    lastMinute = minute;
-    const chime = isWeekday(at) && chimes.includes(hhmm);
-    const today = localDate(at.getTime());
-    const due = schedules.filter(
-      (schedule) =>
-        schedule.time === hhmm &&
-        ("date" in schedule ? schedule.date === today : schedule.days.includes(at.getDay())),
-    );
-    if (!chime && !due.length) return;
-    // By design: a chime that lands while no display is connected is dropped, not
-    // replayed later. This is a display-only board, and a stale 09:00 chime at 09:20
-    // is worse than silence. The same goes for a schedule.
-    // "HH:MM" sorts as text, so the latest chime is the last one sorted: the end of the
-    // workday, whatever times the Admin Console has set. Always a boolean: with none,
-    // the board falls back to "17:00 is the end" and a middle 17:00 would end the day.
-    if (chime)
-      broadcast({ type: "day-chime", at: hhmm, last: hhmm === [...chimes].sort().at(-1) });
-    const audible = soundAllowed();
-    for (const { kind, text, sound } of due)
-      broadcast({
-        type: kind === "reminder" ? "reminder" : "scheduled-celebration",
-        text,
-        sound: sound && `sounds/${sound}`,
-        audible,
-      });
-  }, options.tickMs ?? 30_000);
+  // Day Chimes, Reminders and Scheduled Celebrations go out on the minute they are due.
+  // By design: one that lands while no display is connected is dropped, not replayed
+  // later. This is a display-only board, and a stale 09:00 chime at 09:20 is worse
+  // than silence.
+  // The MVP is derived on read, so a display connected across local midnight would
+  // keep yesterday's leader until something else happened; the rollover pushes one
+  // snapshot. A live Theme ends at that same midnight and rides the same push, and is
+  // also checked each minute on its own so a clock that jumps doesn't strand it.
+  const rollover = () => {
+    if (live !== null && now() >= live.until) live = null;
+    broadcast(snapshot());
+  };
+  const scheduler = createScheduler({
+    now,
+    onMidnight: rollover,
+    onMinute: (at) => {
+      if (live !== null && at >= live.until) rollover();
+      const { chime, schedules: due } = dueAt(at, chimes, schedules);
+      if (chime) broadcast({ type: "day-chime", ...chime });
+      if (!due.length) return;
+      const audible = soundAllowed();
+      for (const { kind, text, sound } of due)
+        broadcast({
+          type: kind === "reminder" ? "reminder" : "scheduled-celebration",
+          text,
+          sound: sound && `sounds/${sound}`,
+          audible,
+        });
+    },
+  });
 
   return {
     port: (http.address() as AddressInfo).port,
@@ -1245,7 +1214,7 @@ export async function startServer(port: number, options: Options = {}) {
     adminPort: (adminHttp.address() as AddressInfo | null)?.port,
     close: () =>
       new Promise<void>((resolve) => {
-        clearInterval(scheduler);
+        scheduler.stop();
         clearInterval(reconciliation);
         statusMonitor.stop();
         wauMonitor?.stop();

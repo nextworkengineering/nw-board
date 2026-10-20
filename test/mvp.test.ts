@@ -122,8 +122,9 @@ test.for([
 });
 
 test("a display left connected across local midnight is pushed the reset MVP", async () => {
-  let clock = new Date(2026, 7, 13, 23, 30, 0).getTime(); // Thursday, late
-  running = await startServer(0, { configPath, now: () => clock, tickMs: 10 });
+  // Thursday, 10 ms short of midnight: the scheduler re-arms for what is left until the clock moves.
+  let clock = new Date(2026, 7, 14).getTime() - 10;
+  running = await startServer(0, { configPath, now: () => clock });
   await postWebhook(running.port, { body: merged });
   const { ws, messages } = await connectedDisplay(running.port);
 

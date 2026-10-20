@@ -51,12 +51,10 @@ const stubNormalize = async (src: string, dest: string) => {
 async function start(
   paths: ReturnType<typeof setup>,
   clock: () => number = () => at(THURSDAY, 10),
-  tickMs?: number,
 ) {
   running = await startServer(0, {
     ...paths,
     now: clock,
-    tickMs,
     normalize: stubNormalize,
   });
   return running;
@@ -179,10 +177,16 @@ test.for([
   expect(readFileSync(paths.configPath, "utf8")).toBe(before);
 });
 
-/** Start at `from`, connect a display, move the clock to `to`, and collect what it was pushed. */
-async function watch(paths: ReturnType<typeof setup>, from: number, to: number, before?: () => Promise<void>) {
-  let clock = from;
-  await start(paths, () => clock, 10);
+/**
+ * Start 10 ms before the minute `to`, connect a display, move the clock to `to`, and
+ * collect what it was pushed. While the clock holds just short of the minute the
+ * scheduler re-arms for the 10 ms left, so it lands moments after the move.
+ * Which minutes are due is dueAt's (test/scheduler.test.ts); these check the wiring:
+ * Quiet Hours, and chimes and schedules edited live reaching a display.
+ */
+async function watch(paths: ReturnType<typeof setup>, to: number, before?: () => Promise<void>) {
+  let clock = to - 10;
+  await start(paths, () => clock);
   await before?.();
   const { ws, messages } = await connectedDisplay(running!.port);
   await sleep(50);
@@ -206,8 +210,8 @@ test.for([
     ],
   });
 
-  // 200ms of 10ms ticks: a schedule that fired per tick would show up many times over.
-  const received = await watch(paths, at(THURSDAY, hour as number - 1, 59, 55), at(THURSDAY, hour as number));
+  // Once each, though the scheduler woke every 10ms on the way to the minute.
+  const received = await watch(paths, at(THURSDAY, hour as number));
 
   expect(received).toEqual([
     { type: "reminder", text: "Standup in 5", sound: null, audible },
@@ -215,19 +219,10 @@ test.for([
   ]);
 });
 
-test("a one-off fires on its date only", async () => {
-  const oneOff = (id: string, date: string) => ({ ...reminder, id, text: id, days: undefined, date });
-  const paths = setup({ schedules: [oneOff("today", "2026-08-13"), oneOff("tomorrow", "2026-08-14")] });
-
-  const received = await watch(paths, at(THURSDAY, 9, 59, 55), at(THURSDAY, 10));
-
-  expect(received).toEqual([{ type: "reminder", text: "today", sound: null, audible: true }]);
-});
-
 test("a schedule PUT through the console is live, and fires alongside a chime at the same minute", async () => {
   const paths = setup();
   const schedule = { ...reminder, time: "17:00" };
-  const received = await watch(paths, at(THURSDAY, 16, 59, 55), at(THURSDAY, 17), async () => {
+  const received = await watch(paths, at(THURSDAY, 17), async () => {
     expect((await api("PUT", "/api/schedules", [schedule])).status).toBe(204);
   });
 
@@ -239,44 +234,12 @@ test("a schedule PUT through the console is live, and fires alongside a chime at
   expect(JSON.parse(readFileSync(paths.configPath, "utf8")).schedules).toEqual([schedule]);
 });
 
-test.for([
-  ["the first chime is flagged not last", 9, { type: "day-chime", at: "09:00", last: false }],
-  ["the latest chime is flagged last", 17, { type: "day-chime", at: "17:00", last: true }],
-])("%s", async ([, hour, message]) => {
-  const received = await watch(setup(), at(THURSDAY, hour as number - 1, 59, 55), at(THURSDAY, hour as number));
-  expect(received).toEqual([message]);
-});
-
 test("the last flag follows chime times edited live", async () => {
   const paths = setup();
-  const received = await watch(paths, at(THURSDAY, 16, 59, 55), at(THURSDAY, 17), async () => {
+  const received = await watch(paths, at(THURSDAY, 17), async () => {
     expect((await api("PUT", "/api/settings", { chimes: ["17:00", "18:30"] })).status).toBe(204);
   });
   expect(received).toEqual([{ type: "day-chime", at: "17:00", last: false }]);
-});
-
-// The board's fallback for a chime with no flag is "17:00 is the end", so a 17:00
-// that is not the latest must say so, or the day ends twice.
-test("a middle 17:00 chime carries last:false", async () => {
-  const paths = setup({ chimes: ["09:00", "17:00", "18:00"] });
-  const received = await watch(paths, at(THURSDAY, 16, 59, 55), at(THURSDAY, 17));
-  expect(received).toEqual([{ type: "day-chime", at: "17:00", last: false }]);
-});
-
-test("a clock stepped back across a minute that already fired does not fire it again", async () => {
-  let clock = at(THURSDAY, 9, 58, 55);
-  await start(setup({ chimes: ["09:59", "10:00"] }), () => clock, 10);
-  const { ws, messages } = await connectedDisplay(running!.port);
-  for (const next of [at(THURSDAY, 9, 59), at(THURSDAY, 10), at(THURSDAY, 9, 59, 30), at(THURSDAY, 10, 0, 10)]) {
-    await sleep(80);
-    clock = next;
-  }
-  await sleep(80);
-  ws.close();
-  expect(messages.filter((m) => m.type !== "snapshot")).toEqual([
-    { type: "day-chime", at: "09:59", last: false },
-    { type: "day-chime", at: "10:00", last: true },
-  ]);
 });
 
 test("an upload is normalized into the library and answers with the normalizer's output", async () => {

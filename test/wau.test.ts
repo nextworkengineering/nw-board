@@ -410,8 +410,9 @@ test("a display connecting after a Target Hit is told the board wears the Arcade
 });
 
 test("the Arcade Theme ends at local midnight with one fresh snapshot", async () => {
-  let clock = new Date(2026, 7, 13, 23, 30).getTime(); // Thursday, late
-  running = await startServer(0, { configPath, now: () => clock, tickMs: 10 });
+  // Thursday, 10 ms short of midnight: the scheduler re-arms for what is left until the clock moves.
+  let clock = new Date(2026, 7, 14).getTime() - 10;
+  running = await startServer(0, { configPath, now: () => clock });
   await fetch(`http://127.0.0.1:${running.port}/wau-target-hit`, { method: "POST" });
   const { ws, messages } = await connectedDisplay(running.port);
   await sleep(50);

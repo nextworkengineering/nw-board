@@ -131,13 +131,16 @@ test.for([
   ]);
 });
 
-/** Drive the mutable clock to `clock` and collect what the display was pushed. */
-async function watchClock(clock: number, next: number) {
-  let current = clock;
+/**
+ * Boot 10 ms before `next`, move the mutable clock to it, and collect what the display
+ * was pushed. While the clock holds just short of the minute the scheduler re-arms for
+ * the 10 ms left, so it lands moments after the move.
+ */
+async function watchClock(next: number) {
+  let current = next - 10;
   running = await startServer(0, {
     configPath,
     now: () => current,
-    tickMs: 10,
   });
   const { ws, messages } = await connectedDisplay(running.port);
   current = next;
@@ -146,28 +149,21 @@ async function watchClock(clock: number, next: number) {
   return messages.filter((message) => message.type !== "snapshot");
 }
 
+// Which minutes chime, and the `last` flag, are dueAt's (test/scheduler.test.ts); these
+// check the config's chimes reach a connected display.
 test.for([
-  ["the start of the workday", at(THURSDAY, 8, 59, 55), at(THURSDAY, 9, 0), { at: "09:00", last: false }],
+  ["the start of the workday", at(THURSDAY, 9, 0), { at: "09:00", last: false }],
   // The latest configured chime is flagged, so the board ends the day on it.
-  ["the end of the workday", at(THURSDAY, 16, 59, 55), at(THURSDAY, 17, 0), { at: "17:00", last: true }],
+  ["the end of the workday", at(THURSDAY, 17, 0), { at: "17:00", last: true }],
 ])(
   "the clock reaching %s on a weekday pushes exactly one Day Chime",
-  async ([, before, after, chime]) => {
-    const received = await watchClock(before as number, after as number);
+  async ([, after, chime]) => {
+    const received = await watchClock(after as number);
 
-    // 200ms of 10ms ticks: a chime that fired per tick would show up many times over.
+    // Once, though the scheduler woke every 10ms on the way to the minute.
     expect(received).toEqual([{ type: "day-chime", ...(chime as object) }]);
   },
 );
-
-test.for([
-  ["a weekend", at(SATURDAY, 8, 59, 55), at(SATURDAY, 9, 0)],
-  ["a minute that is not a chime time", at(THURSDAY, 10, 59, 55), at(THURSDAY, 11, 0)],
-])("the clock reaching 09:00 on %s pushes no Day Chime", async ([, before, after]) => {
-  const received = await watchClock(before as number, after as number);
-
-  expect(received).toEqual([]);
-});
 
 test.for([
   ["a Quiet Hours window that is not HH:MM", "config-bad-quiet-hours.json", /quietHours/],
