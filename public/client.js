@@ -20,6 +20,7 @@ import {
   Texture,
 } from "./vendor/pixi.min.mjs";
 import { play, playAmbient, playClip, resumeAudio, setSamples } from "./audio.js";
+import { createStage } from "./stage.js";
 import { THEMES } from "./themes/index.js";
 
 // The scene is authored at 1080p and scaled to fit whatever the TV reports, so the
@@ -29,7 +30,7 @@ const H = 1080;
 
 // ?theme=<name>: the board's whole look, one of public/themes (kernel when absent
 // or unknown). Read once here and baked into everything built from `C` and
-// label(); switching themes reloads the page (see applyTheme below).
+// label(); switching themes reloads the page (see stage.js).
 const requestedTheme = new URLSearchParams(location.search).get("theme");
 const THEME_NAME = Object.hasOwn(THEMES, requestedTheme ?? "") ? requestedTheme : "kernel";
 const T = THEMES[THEME_NAME];
@@ -1532,36 +1533,18 @@ function showCelebrationClip(maxMs, onFail) {
   };
 }
 
-const pending = [];
-// One occasion on screen at a time: true while a takeover or a banner (Day Chime,
-// Reminder) is showing. A Reminder and a Scheduled Celebration fired the same
-// minute arrive back to back, and a chime can land mid-merge; without the shared
-// flag each started over the other, texts overlapping and both sounds at once.
-// Whichever waits starts when the other finishes (see the two `done`s).
-let stageBusy = false;
+// The queue, the theme reload it holds off and the Target Hit held across that
+// reload live in stage.js, testable without Pixi; this file only draws.
+const stage = createStage({
+  runScene: showTakeover,
+  reload: reloadInto,
+  storage: sessionStorage,
+  theme: THEME_NAME,
+});
+const celebrate = stage.takeover;
 
-function celebrate(type, event = {}, audible = false) {
-  pending.push({ type, event, audible });
-  // ponytail: a huge burst of merges would queue up minutes of fanfare; if that ever
-  // happens, drop all but the newest few here.
-  playNextCelebration();
-}
-
-// Theme switches are reloads with ?theme= rewritten, held until no takeover is
-// playing or queued so a reload never cuts one off. Only a theme that differs
-// from the one this page loaded with triggers one, so a reload cannot loop.
-let wantTheme = THEME_NAME;
-// Day Chimes and Reminders on screen or waiting their turn (see queueBanner): a
-// reload would cut the bell off mid-sound.
-let chimes = 0;
-function applyTheme() {
-  // Staying put (a switch called off before it happened, or the reload just
-  // landed): any held Target Hit plays here rather than being lost.
-  if (wantTheme === THEME_NAME) {
-    playHeldCelebration();
-    return;
-  }
-  if (stageBusy || pending.length > 0 || chimes > 0) return;
+/** Reload into `theme`, keeping every other query param (?fps, ?demo). */
+function reloadInto(theme) {
   // Split by hand rather than URLSearchParams, which would rewrite ?fps as ?fps=.
   const params = location.search
     .slice(1)
@@ -1569,29 +1552,13 @@ function applyTheme() {
     // A bare ?arcade is the pre-?theme= spelling; drop it with any old theme.
     .filter((param) => param && !["theme", "arcade"].includes(param.split("=")[0]));
   // The kernel theme is the default, so its URL stays clean.
-  if (wantTheme !== "kernel") params.push(`theme=${wantTheme}`);
+  if (theme !== "kernel") params.push(`theme=${theme}`);
   const query = params.length ? `?${params.join("&")}` : "";
   location.replace(`${location.pathname}${query}${location.hash}`);
 }
-// A Target Hit on the kernel theme is held across the reload into the Arcade
-// Theme, so its whole takeover plays in the arcade look.
-const PENDING_CELEBRATION = "pending-celebration";
-function playHeldCelebration() {
-  const held = sessionStorage.getItem(PENDING_CELEBRATION);
-  if (!held) return;
-  sessionStorage.removeItem(PENDING_CELEBRATION);
-  const data = JSON.parse(held);
-  celebrate(data.type, data, Boolean(data.audible));
-}
 
-function playNextCelebration() {
-  if (stageBusy) return;
-  if (pending.length === 0) {
-    applyTheme();
-    return;
-  }
-  const next = pending.shift();
-  stageBusy = true;
+/** Play a takeover's sound and draw its scene; `done` hands the stage back. */
+function showTakeover(next, done) {
   // A Scheduled Celebration brings its own clip (or none) instead of a slot's.
   if (next.audible && next.type === "scheduled-celebration")
     playClip(next.event.sound, "pr-merged");
@@ -1603,12 +1570,7 @@ function playNextCelebration() {
       "wau-target-hit": wauTakeover,
       "scheduled-celebration": scheduledTakeover,
     }[next.type] ?? approvedTakeover;
-  scene(next.event, () => {
-    stageBusy = false;
-    // A banner that waited out this takeover goes before any further takeovers.
-    if (banners.length) nextBanner();
-    else playNextCelebration();
-  });
+  scene(next.event, done);
 }
 
 // Neobrutal sets takeovers and chimes on a card. The card's ground is the theme's
@@ -2129,33 +2091,10 @@ const AMBIENT = {
 };
 const ambient = (type) => AMBIENT[type]?.();
 
-// Day Chimes and Reminders share the middle of the screen, so one fired the same
-// minute as another (a 09:00 Reminder lands with the 09:00 chime) waits its turn
-// instead of drawing over it. `show` gets the `done` it must call once.
-// It also waits out a takeover, and a takeover waits for it (see stageBusy).
-const banners = [];
-function queueBanner(show) {
-  banners.push(show);
-  chimes++;
-  nextBanner();
-}
-function nextBanner() {
-  if (stageBusy) return;
-  const show = banners.shift();
-  if (!show) return applyTheme();
-  stageBusy = true;
-  show(() => {
-    stageBusy = false;
-    chimes--;
-    // A takeover that waited out this banner goes before any further banners.
-    if (pending.length) playNextCelebration();
-    else nextBanner();
-  });
-}
-
 /** Day Chime: a banner sweeps across the marquee line and the bell plays. */
 function chime(at = "", last = at === "17:00") {
-  queueBanner((done) => chimeScene(at, last, done));
+  // Shares the middle of the screen with Reminders and takeovers (see stage.js).
+  stage.banner((done) => chimeScene(at, last, done));
 }
 
 function chimeScene(at, endOfDay, done) {
@@ -2325,7 +2264,7 @@ function handleMessage(data) {
     return;
   }
   if (data.type === "reminder") {
-    queueBanner((done) => reminder(data, done));
+    stage.banner((done) => reminder(data, done));
     return;
   }
   if (data.type === "scheduled-celebration") {
@@ -2334,24 +2273,14 @@ function handleMessage(data) {
   }
   // Not a PR, so no Feed row — renderFeed would trip over the missing repo.
   if (data.type === "wau-target-hit") {
-    if (THEME_NAME === "arcade") {
-      // Cancels any switch away still held behind a takeover: the server has just
-      // put the board in arcade, so leaving would only bounce straight back.
-      wantTheme = "arcade";
-      celebrate(data.type, data, Boolean(data.audible));
-    } else {
-      sessionStorage.setItem(PENDING_CELEBRATION, JSON.stringify(data));
-      wantTheme = "arcade";
-      applyTheme();
-    }
+    stage.targetHit(data);
     return;
   }
   if (data.type === "snapshot") {
     // Absent from old servers, or a theme this page doesn't know: no opinion, so
     // no reload.
     if (typeof data.theme === "string" && Object.hasOwn(THEMES, data.theme)) {
-      wantTheme = data.theme;
-      applyTheme();
+      stage.wantTheme(data.theme);
     }
     if (data.sounds) setSamples(data.sounds);
     feed = data.feed.map(stamp);
@@ -2403,7 +2332,7 @@ setInterval(() => void loadStatus(), STATUS_REFRESH_MS);
 setInterval(() => void loadHeadlines(), NEWS_REFRESH_MS);
 
 // The Target Hit that switched this page into the Arcade Theme plays now.
-playHeldCelebration();
+stage.playHeld();
 
 // Visual QA hook: the canvas can only be checked by a human, so every animation and
 // every sound can be fired from the browser console.
