@@ -25,7 +25,9 @@ export const DAYS = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Th
  * counted on the day of their first pageview), then the week's distinct persons. One
  * row rather than a GROUP BY day, so a day with nobody new is a 0 and not a gap.
  * `event` sits in the same WHERE as the bot check, so ClickHouse prunes on its sort
- * key and reads the week's pageviews, not every event of the week.
+ * key and reads the week's pageviews, not every event of the week. A ninth column
+ * names the current week by its start, in both queries, so a live and a last-week row
+ * read on either side of Saturday midnight can be told apart.
  */
 const perDay = (since: string, until: string, extra = "") => `WITH
   toStartOfDay(toTimeZone(now(), 'America/Chicago')) AS today_ct,
@@ -38,7 +40,8 @@ SELECT
   countIf(day = 4) AS wed,
   countIf(day = 5) AS thu,
   countIf(day = 6) AS fri,
-  count() AS total
+  count() AS total,
+  week_start
 FROM (
   SELECT (toDayOfWeek(toTimeZone(min(timestamp), 'America/Chicago')) + 1) % 7 AS day
   FROM events
@@ -120,11 +123,13 @@ export const wauPayload = (reading: Reading<Wau> | undefined) =>
 
 /**
  * The reader. Every read runs the live query; last week's row is read once per Central
- * day (the first read of a day, so Saturday's moves on with the week). The target tile
- * is read hourly and the activation tile every 15 minutes, both from PostHog's cache
- * (`force_cache`), and each keeps its last good value through a failed read; with no
- * target or activation read yet there is no reading. One `blocking` recompute of
- * those two tiles an hour keeps that cache warm, never more than one at a time.
+ * day (the first read of a day, so Saturday's moves on with the week), and a read whose
+ * two rows count different weeks is dropped. The target tile is read hourly and the
+ * activation tile every 15 minutes, both from PostHog's cache (`force_cache`), and each
+ * keeps its last good value through a failed read; with no target or activation read
+ * yet there is no reading. One `blocking` recompute of those two tiles an hour keeps
+ * that cache warm (a failed one is tried again after 5 minutes), never more than one
+ * at a time.
  *
  * A 429 from any call fails the whole read with its Retry-After, so the Monitor backs
  * off and keeps the last good reading.
@@ -166,6 +171,7 @@ export function wauReader({
     return JSON.parse(await limitedText(response, "PostHog response exceeds 1 MiB"));
   };
 
+  /** A query's 8 counts, and the week (its start, as PostHog wrote it) they belong to. */
   const query = async (name: string, sql: string) => {
     const body = await call("/query/", {
       method: "POST",
@@ -175,9 +181,12 @@ export function wauReader({
       body: JSON.stringify({ query: { kind: "HogQLQuery", query: sql }, refresh: "force_blocking", name }),
     });
     const row = body?.results?.[0];
-    if (!Array.isArray(row) || row.length !== 8 || !row.every((n) => Number.isFinite(n) && n >= 0))
+    // The week is only ever compared with the other query's, so a row without one is
+    // let through: two such rows match, and one beside a dated row doesn't.
+    const counts = Array.isArray(row) && row.length <= 9 ? row.slice(0, 8) : [];
+    if (counts.length !== 8 || !counts.every((n) => Number.isFinite(n) && n >= 0))
       throw new Error(`PostHog ${name} is not one row of 8 counts`);
-    return row as number[];
+    return { counts: counts as number[], week: row[8] as unknown };
   };
 
   const tiles = (ids: number[], refresh: string, waitMs?: number) =>
@@ -214,19 +223,24 @@ export function wauReader({
   const activation = tile(ACTIVATION_TILE, 15 * 60 * 1000);
 
   let warming = false;
+  // Only a warm that worked buys the hour. A failed or timed-out one is tried again
+  // after 5 minutes, so a cold cache at boot isn't left without a target or rate.
   let warmedAt = -Infinity;
+  let triedAt = -Infinity;
   const warm = () => {
-    if (warming || Math.abs(now() - warmedAt) < HOUR_MS) return;
+    const at = now();
+    if (warming || Math.abs(at - warmedAt) < HOUR_MS || Math.abs(at - triedAt) < 5 * 60_000) return;
     warming = true;
-    warmedAt = now();
+    triedAt = at;
     // In the background: a recompute can outlast any read, and the cache it fills is
     // what the next force_cache reads see.
     tiles([TARGET_TILE, ACTIVATION_TILE], "blocking", 5 * 60_000)
+      .then(() => (warmedAt = at))
       .catch((error) => console.warn(`WUU tile refresh failed: ${error}`))
       .finally(() => (warming = false));
   };
 
-  let lastWeek: { key: string; row: number[] } | undefined;
+  let lastWeek: { key: string; previous: { counts: number[]; week: unknown } } | undefined;
   let last: { key: string; ahead: boolean } | undefined;
   let celebratedOn = "";
 
@@ -236,9 +250,9 @@ export function wauReader({
     const at = now();
     const key = dayKey(at);
     warm();
-    const [live, previous, targetWau, activationPercent] = await Promise.all([
+    const [{ counts: live, week }, previous, targetWau, activationPercent] = await Promise.all([
       query("board-wuu-live", LIVE_QUERY),
-      lastWeek?.key === key ? lastWeek.row : query("board-wuu-last-week", LAST_WEEK_QUERY),
+      lastWeek?.key === key ? lastWeek.previous : query("board-wuu-last-week", LAST_WEEK_QUERY),
       target(),
       activation(),
     ]);
@@ -251,9 +265,19 @@ export function wauReader({
     // for the whole day, so this read is dropped and the next one asks again.
     if (live.slice(today + 1, 7).some((count) => count > 0))
       throw new Error("PostHog's week is not the board's: new WUU after today");
-    lastWeek = { key, row: previous };
+    // Each query reads PostHog's own now(), so two run side by side can land either
+    // side of Saturday midnight, one counting the week before the other's. Ask both
+    // again next time rather than keep a last week that is a week out all day.
+    if (previous.week !== week) {
+      lastWeek = undefined;
+      throw new Error("PostHog's last week is not the live week's: read across its week rollover");
+    }
+    lastWeek = { key, previous };
 
-    const wau = toWau({ live, lastWeek: previous, target: targetWau, activation: activationPercent }, at);
+    const wau = toWau(
+      { live, lastWeek: previous.counts, target: targetWau, activation: activationPercent },
+      at,
+    );
     const row = wau.daily[today];
     const ahead = row.current > row.previous;
     if (last && !(last.key === key && last.ahead) && ahead && celebratedOn !== key) {

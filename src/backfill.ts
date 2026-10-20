@@ -32,9 +32,9 @@ const MINUTE_MS = 60 * 1000;
  * Every pr-opened, pr-merged, pr-closed and review-approved in `repos` that happened in
  * [since, until], oldest first (the Feed's order: its 24h expiry shifts off the front).
  * Reviews are fetched only for PRs updated since `reviewsSince` — submitting a review
- * bumps the PR's updated_at, so an older PR has no new approval to find. One repo that
- * errors loses its own history, not the others'; one PR whose reviews error loses only
- * its approvals.
+ * bumps the PR's updated_at, so an older PR has no new approval to find. One repo whose
+ * open list errors loses its own history, not the others'; a closed list that errors
+ * loses only its merges and closes; one PR whose reviews error loses only its approvals.
  */
 async function happened(
   get: GitHubGet,
@@ -53,13 +53,19 @@ async function happened(
   for (const repo of repos) {
     try {
       const prs: any[] = [...(await get(`${repo}/pulls?state=open&per_page=100`))];
+      let closed: any[] = [];
+      try {
+        // ponytail: one page per repo — the ceiling is 100 closed PRs per repo per
+        // week; page through only if a repo ever outruns that.
+        closed = await get(`${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100`);
+      } catch (error) {
+        console.warn(
+          `${caller} failed for ${repo}'s closed PRs, its merges and closes are live-only for now: ${error}`,
+        );
+      }
       // Closed PRs come back newest-updated first, so we can stop at the first one
       // that predates the window.
-      // ponytail: one page per repo — the ceiling is 100 closed PRs per repo per
-      // week; page through only if a repo ever outruns that.
-      for (const pr of await get(
-        `${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100`,
-      )) {
+      for (const pr of closed) {
         if (Date.parse(pr.updated_at) < since) break;
         prs.push(pr);
       }
@@ -112,8 +118,8 @@ export function createHistory({ get, now, repos }: { get: GitHubGet; now: () => 
      * last week at that moment, so reaching back past it would re-record Sunday's
      * events as if they had been missed.
      */
-    reconcile: () =>
-      happened(get, repos, "Reconcile", {
+    reconcile: async () => {
+      const found = await happened(get, repos, "Reconcile", {
         since: Math.max(startOfWeek(now()), now() - DAY_MS),
         // A webhook a few seconds behind its event must still win, or its sound and
         // the merger's MVP credit go to a silent author-credited recovery instead.
@@ -121,6 +127,11 @@ export function createHistory({ get, now, repos }: { get: GitHubGet; now: () => 
         // ponytail: 30-minute lookback keeps this to a couple of requests per tick; a
         // delivery lost longer ago than that waits for the next restart's Backfill.
         reviewsSince: now() - 30 * MINUTE_MS,
-      }),
+      });
+      // The same cutoff again, now: a Reconcile that set out on Sunday night and
+      // lands after Monday 00:00 meets a dedup set that has just forgotten Sunday.
+      const week = startOfWeek(now());
+      return found.filter(({ at }) => at >= week);
+    },
   };
 }

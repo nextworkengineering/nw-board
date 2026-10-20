@@ -138,6 +138,22 @@ test("Reconcile never reaches back past Monday 00:00, when the dedup set forgets
   expect((await reconcile()).map(({ event }) => event.title)).toEqual(["Monday"]);
 });
 
+test("a Reconcile that lands after Monday 00:00 drops what the new week's dedup set has forgotten", async () => {
+  const midnight = new Date(Date.parse("2026-08-24T17:00:00Z")).setHours(0, 0, 0, 0);
+  let clock = midnight - 10 * MINUTE;
+  const { reconcile } = createHistory({
+    // Asked on Sunday night, answered on Monday.
+    get: async (path) => {
+      clock = midnight + 10 * MINUTE;
+      return path === OPEN ? [{ number: 1, title: "Sunday", created_at: at(midnight - HOUR) }] : [];
+    },
+    now: () => clock,
+    repos: [REPO],
+  });
+
+  expect(await reconcile()).toEqual([]);
+});
+
 test("Reconcile covers the last 24h, leaving the last 2 minutes to their webhooks", async () => {
   const { reconcile } = history({
     [OPEN]: [
@@ -203,6 +219,28 @@ test("a repo that errors loses its own history; a PR whose reviews error loses o
     expect(warn.mock.calls.map(([line]) => line)).toEqual([
       `Backfill failed for ${broken}, its history is live-only for now: Error: GitHub API 404`,
       `Backfill skipped reviews for ${REPO}#1: Error: GitHub API 502`,
+    ]);
+  } finally {
+    warn.mockRestore();
+  }
+});
+
+test("closed-list failure keeps the open PRs", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const { backfill } = history({
+      [OPEN]: [{ number: 1, title: "Open", created_at: ago(2 * HOUR), updated_at: ago(HOUR) }],
+      [CLOSED]: new Error("GitHub API 502"),
+      [reviews(1)]: [{ state: "APPROVED", submitted_at: ago(HOUR), user: { login: "rita" } }],
+    });
+
+    // Its openings and approvals still count; only the merges and closes are lost.
+    expect((await backfill()).map(({ event }) => `${event.type}#${event.number}`)).toEqual([
+      "pr-opened#1",
+      "review-approved#1",
+    ]);
+    expect(warn.mock.calls.map(([line]) => line)).toEqual([
+      `Backfill failed for ${REPO}'s closed PRs, its merges and closes are live-only for now: Error: GitHub API 502`,
     ]);
   } finally {
     warn.mockRestore();

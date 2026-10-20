@@ -61,7 +61,9 @@ export function createMonitor<T>({
         next = { value, fetchedAt: new Date(lastGood).toISOString(), stale: false };
       } catch (error) {
         const { retryAfterMs } = error as { retryAfterMs?: number };
-        if (retryAfterMs && retryAfterMs > 0)
+        // Not after stop(): it has already cleared the timers, and this one would keep
+        // the process alive for the length of the Retry-After.
+        if (retryAfterMs && retryAfterMs > 0 && !stopped)
           held = setTimeout(() => (held = undefined), retryAfterMs);
         console.warn(`${name} unavailable${reading ? ", keeping the last good reading" : ""}: ${error}`);
       }

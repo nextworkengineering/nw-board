@@ -157,3 +157,14 @@ test("stop ends the reads, and a read in flight pushes nothing", async () => {
   expect(onChange).not.toHaveBeenCalled();
   expect(vi.getTimerCount()).toBe(0);
 });
+
+test("a 429 after stop leaves no timer", async () => {
+  let refuse!: (error: unknown) => void;
+  const read = vi.fn(() => new Promise((_, reject) => (refuse = reject)));
+  monitor = createMonitor({ name: "Test", read, intervalMs: INTERVAL, now: Date.now, onChange: () => {} });
+  monitor.stop();
+  // The read in flight at stop() comes back limited: its Retry-After holds nothing.
+  refuse(fails({ retryAfterMs: 60_000 })());
+  await vi.advanceTimersByTimeAsync(0);
+  expect(vi.getTimerCount()).toBe(0);
+});
