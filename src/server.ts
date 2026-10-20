@@ -186,6 +186,10 @@ type Options = {
   posthogApiBase?: string;
   /** How long the WUU dashboard proxy waits for PostHog's cached read. */
   posthogTimeoutMs?: number;
+  /** The upstream status pages; tests point these at stubs. */
+  statusUrls?: { github?: string; sentry?: string; gcp?: string };
+  /** How long the status proxy waits for each status page. */
+  statusTimeoutMs?: number;
   /** The Admin Console's loopback-only port; 0 picks a free one. */
   adminPort?: number;
   /** The Sound Library root (built-ins, plus uploads/); tests point this at a temp dir. */
@@ -238,6 +242,60 @@ const WAU_TILES = {
   activationPercent: 10992630,
   daily: 7119735,
 } as const;
+
+const STATUS_URLS = {
+  github: "https://www.githubstatus.com/api/v2/status.json",
+  sentry: "https://status.sentry.io/api/v2/status.json",
+  gcp: "https://status.cloud.google.com/incidents.json",
+};
+// Cloud Run, Google Cloud Storage, Cloud Firestore — the GCP products we run on.
+const GCP_PRODUCTS = ["9D7d2iNBQWN24zc1VamE", "UwaYoXQ5bHYHG6EdiPB8", "CETSkT92V21G6A1x28me"];
+// GCP lists a worldwide incident under an explicit "global" location.
+const GCP_REGIONS = ["us-central1", "us-east1", "us-west1", "global"];
+const GCP_SEVERITY = ["low", "medium", "high"];
+
+type StatusLevel = "ok" | "minor" | "major" | "unknown";
+
+/** A Statuspage summary (GitHub, Sentry). Maintenance counts as minor, not ok. */
+function normalizeStatuspage(payload: any): { level: StatusLevel; text: string } {
+  const { indicator, description } = payload?.status ?? {};
+  if (typeof indicator !== "string" || typeof description !== "string")
+    throw new Error("status page has no indicator");
+  const level =
+    indicator === "none"
+      ? "ok"
+      : indicator === "major" || indicator === "critical"
+        ? "major"
+        : "minor";
+  // A healthy row reads the same for every service, and fits the narrow panel.
+  return { level, text: level === "ok" ? "OPERATIONAL" : description.toUpperCase() };
+}
+
+/**
+ * GCP's incident history, narrowed to open incidents on our products that reach our
+ * regions. No current locations means the incident has recovered, so it does not count.
+ */
+function normalizeGcpIncidents(payload: any): { level: StatusLevel; text: string } {
+  if (!Array.isArray(payload)) throw new Error("GCP incidents is not a list");
+  const relevant = payload.filter(
+    (incident: any) =>
+      !incident?.end &&
+      incident?.affected_products?.some?.((product: any) => GCP_PRODUCTS.includes(product?.id)) &&
+      incident?.currently_affected_locations?.some?.((location: any) =>
+        GCP_REGIONS.includes(location?.id),
+      ),
+  );
+  if (relevant.length === 0) return { level: "ok", text: "OPERATIONAL" };
+  const rank = (incident: any) => GCP_SEVERITY.indexOf(incident.severity);
+  const worst = relevant.reduce((a: any, b: any) => (rank(b) > rank(a) ? b : a));
+  return {
+    level: worst.severity === "high" ? "major" : "minor",
+    text:
+      typeof worst.status_impact === "string"
+        ? worst.status_impact.replaceAll("_", " ")
+        : "INCIDENT",
+  };
+}
 
 function normalizeWauDashboard(payload: any) {
   const tiles = Array.isArray(payload) ? payload : payload?.results;
@@ -685,6 +743,35 @@ export async function startServer(port: number, options: Options = {}) {
       console.warn(`News feed unavailable: ${error}`);
       res.sendStatus(502);
     }
+  });
+
+  // Same-origin proxy for the status panel. Destinations are fixed, and each service
+  // fails on its own: one status page down shows that row UNAVAILABLE, not a 502.
+  app.get("/status.json", async (_req, res) => {
+    const read = async (url: string) => {
+      const response = await fetch(url, {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(options.statusTimeoutMs ?? 5_000),
+      });
+      if (!response.ok) throw new Error(`returned ${response.status}`);
+      return JSON.parse(await limitedText(response, "status response exceeds 1 MiB"));
+    };
+    const services = [
+      { name: "GITHUB", url: options.statusUrls?.github ?? STATUS_URLS.github, normalize: normalizeStatuspage },
+      { name: "SENTRY", url: options.statusUrls?.sentry ?? STATUS_URLS.sentry, normalize: normalizeStatuspage },
+      { name: "GCP", url: options.statusUrls?.gcp ?? STATUS_URLS.gcp, normalize: normalizeGcpIncidents },
+    ];
+    const results = await Promise.allSettled(
+      services.map(async ({ url, normalize }) => normalize(await read(url))),
+    );
+    res.set("Cache-Control", "no-store").json({
+      fetchedAt: new Date().toISOString(),
+      services: results.map((result, i) => {
+        if (result.status === "fulfilled") return { name: services[i].name, ...result.value };
+        console.warn(`${services[i].name} status unavailable: ${result.reason}`);
+        return { name: services[i].name, level: "unknown", text: "UNAVAILABLE" };
+      }),
+    });
   });
 
   // The credential stays on the server and the destination is fixed: the kiosk can
