@@ -798,31 +798,23 @@ app.ticker.add((t) => {
   }
 });
 
-/** Stale data keeps its words but dims every light: a light is a claim about now. */
-function renderStatus(data, stale = false) {
-  latestStatus = data;
+/**
+ * Draws a pushed Service Status payload; null (or one without services) reads
+ * CHECKING…. Stale data — the server's `stale`, or no socket to hear it from —
+ * keeps its words but dims every light: a light is a claim about now.
+ */
+function renderStatus(data) {
+  if (data != null && !Array.isArray(data.services)) console.warn("invalid status data", data);
+  latestStatus = Array.isArray(data?.services) ? data : null;
+  const stale = !socketOpen || latestStatus?.stale === true;
   for (const row of statusRows) {
     const { name, light, text } = row;
-    const service = data?.services?.find((entry) => entry.name === name);
+    const service = latestStatus?.services.find((entry) => entry?.name === name);
     const level = Object.hasOwn(STATUS_LIGHT, service?.level ?? "") ? service.level : "unknown";
     light.clear().circle(0, 0, 16).fill(stale || !service ? C.dim : STATUS_LIGHT[level]);
     if (T.decorations.stats) light.stroke({ width: T.decorations.stats.outline, color: C.ink, alignment: 1 });
     text.style.fill = service ? STATUS_INK[level] : C.dim;
     setStatusText(row, service ? String(service.text) : "CHECKING…");
-  }
-}
-
-const STATUS_REFRESH_MS = 2 * 60 * 1000;
-async function loadStatus() {
-  try {
-    const response = await fetch("/status.json", { cache: "no-store" });
-    if (!response.ok) throw new Error(`status returned ${response.status}`);
-    const next = await response.json();
-    if (!Array.isArray(next.services)) throw new Error("invalid status data");
-    renderStatus(next, Date.now() - Date.parse(next.fetchedAt) > 2 * STATUS_REFRESH_MS);
-  } catch (error) {
-    console.warn(error);
-    renderStatus(latestStatus, latestStatus !== null);
   }
 }
 
@@ -966,10 +958,28 @@ wauUnavailable.anchor.set(0.5);
 wauUnavailable.position.set(wauChart.x + plot.x + plot.width / 2, 154);
 wauPanel.addChild(wauUnavailable);
 
+/** A pushed WUU payload the panel can draw, else null: drawn as unavailable. */
+function validWau(data) {
+  if (data == null) return null;
+  if (
+    ![data.currentWau, data.targetWau, data.targetPercent, data.activationPercent].every(
+      Number.isFinite,
+    ) ||
+    !Array.isArray(data.daily) ||
+    data.daily.length !== 7 ||
+    !data.daily.every((point) => Number.isFinite(point?.current) && Number.isFinite(point?.previous))
+  ) {
+    console.warn("invalid WUU data", data);
+    return null;
+  }
+  return data;
+}
+
 let latestWau = null;
-function renderWau(data, stale = false) {
-  latestWau = data;
-  const snapshot = data;
+/** Stale — the server's `stale`, or no socket to hear it from — keeps the numbers, flagged. */
+function renderWau(data) {
+  const snapshot = (latestWau = validWau(data));
+  const stale = !socketOpen || snapshot?.stale === true;
   wauUnavailable.visible = !snapshot;
   wauChart.visible = Boolean(snapshot);
   onTargetTile.visible = Boolean(snapshot);
@@ -1054,29 +1064,6 @@ function renderWau(data, stale = false) {
     day.text = (snapshot.daily[index].label ?? `D${index + 1}`).slice(0, 3).toUpperCase();
     day.position.set(x(index), plot.y + plot.height + 22);
   });
-}
-
-const WAU_REFRESH_MS = 15 * 60 * 1000;
-async function loadWau() {
-  try {
-    const response = await fetch("/wau.json", { cache: "no-store" });
-    if (!response.ok) throw new Error(`WUU dashboard returned ${response.status}`);
-    const next = await response.json();
-    if (
-      ![next.currentWau, next.targetWau, next.targetPercent, next.activationPercent].every(
-        Number.isFinite,
-      ) ||
-      !Array.isArray(next.daily) ||
-      next.daily.length !== 7
-    )
-      throw new Error("invalid WUU dashboard data");
-    // The server answers 200 with its last good numbers when PostHog fails, so a Pi
-    // that lost its network overnight would otherwise show yesterday's WUU as UPDATED.
-    renderWau(next, Date.now() - Date.parse(next.fetchedAt) > 2 * WAU_REFRESH_MS);
-  } catch (error) {
-    console.warn(error);
-    renderWau(latestWau, true);
-  }
 }
 
 // --------------------------------------------------------------------------------
@@ -2006,7 +1993,7 @@ function ambientScene(container, duration, update, done) {
   return true;
 }
 
-/** pr-opened: a rocket flies in from the left and docks on the In Flight panel. */
+/** pr-opened: a rocket flies across the board from the left. */
 function prOpenedAnimation() {
   const scene = new Container();
   const rocket = pixelSprite("rocket", 10);
@@ -2035,7 +2022,7 @@ function prOpenedAnimation() {
   });
 }
 
-/** pr-closed: the PR's crate tips off the In Flight wall and falls away. */
+/** pr-closed: the PR's crate tips off the Feed's edge and falls away. */
 function prClosedAnimation() {
   const scene = new Container();
   const crate = pixelSprite("crate", 9, C.red);
@@ -2236,10 +2223,10 @@ app.ticker.add((ticker) => {
 // --------------------------------------------------------------------------------
 // Display protocol (server -> client only):
 //   {type:"snapshot", feed:[{<domain event>, at}],
-//    openPrs:[{repo,number,title,actor}],       (openPrs.actor is the PR's author)
 //    mvp:{names,count}|null,                    (all Actors tied for today's lead)
 //    devDeploy:{actor,at}|null,                 (last teammate to deploy to dev)
-//    theme:"<name>"}                            (theme to wear; absent/unknown = no opinion)
+//    theme:"<name>",                            (theme to wear; absent/unknown = no opinion)
+//    wau:<WUU>|null, status:<Service Status>|null}  (null before the server's first read)
 //   on connect and after every recorded event, then bare domain
 //   events {type, repo, number, title, actor}; actor is the GitHub login of whoever
 //   did it (merger, reviewer, commenter), always a string and "" when GitHub named
@@ -2256,9 +2243,21 @@ app.ticker.add((ticker) => {
 //   from the Admin Console; sound is "sounds/….mp3" or null (jingle). No Feed row.
 //   The snapshot's sounds:{slot:"sounds/….mp3"} names the Admin Console's assigned
 //   slots; absent (old servers) keeps the clips the page has.
+//   {type:"wau", wau:<WUU>} and {type:"status", status:<Service Status>} push a
+//   panel's payload (the /wau.json and /status.json bodies, each with the server's
+//   stale:true|false) only when it changes, so silence is not staleness: the panels
+//   grey only while the socket is down, until the next snapshot redraws them.
 // --------------------------------------------------------------------------------
 
 function handleMessage(data) {
+  if (data.type === "wau") {
+    renderWau(data.wau);
+    return;
+  }
+  if (data.type === "status") {
+    renderStatus(data.status);
+    return;
+  }
   if (data.type === "day-chime") {
     chime(data.at ?? "", data.last ?? data.at === "17:00");
     return;
@@ -2287,6 +2286,8 @@ function handleMessage(data) {
     currentMvp = data.mvp;
     setMvp(currentMvp);
     setDevDeploy(data.devDeploy);
+    renderWau(data.wau);
+    renderStatus(data.status);
   } else {
     feed.push(stamp(data));
     if (CELEBRATIONS.has(data.type)) celebrate(data.type, data, Boolean(data.audible));
@@ -2302,18 +2303,25 @@ function handleMessage(data) {
 }
 
 let backoff = 500;
+// WUU and Status are only as fresh as this socket: while it is down they draw stale.
+let socketOpen = false;
 function connect() {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   const socket = new WebSocket(`${protocol}//${location.host}`);
 
+  // The connect snapshot right behind this redraws both panels live.
   socket.addEventListener("open", () => {
     backoff = 500;
+    socketOpen = true;
   });
 
   socket.addEventListener("message", (message) => handleMessage(JSON.parse(message.data)));
 
   // The TV has no keyboard, so it has to recover from a dropped socket alone.
   socket.addEventListener("close", () => {
+    socketOpen = false;
+    renderWau(latestWau);
+    renderStatus(latestStatus);
     setTimeout(connect, backoff);
     backoff = Math.min(backoff * 2, 10_000);
   });
@@ -2324,11 +2332,7 @@ renderFeed();
 renderWau(null);
 renderStatus(null);
 renderHeadlines([]);
-void loadWau();
-void loadStatus();
 void loadHeadlines();
-setInterval(() => void loadWau(), WAU_REFRESH_MS);
-setInterval(() => void loadStatus(), STATUS_REFRESH_MS);
 setInterval(() => void loadHeadlines(), NEWS_REFRESH_MS);
 
 // The Target Hit that switched this page into the Arcade Theme plays now.
@@ -2347,10 +2351,11 @@ stage.playHeld();
 //   hear it with arcade.play("pr-opened") or arcade.event({...,"audible":true})
 //   arcade.setMvp({names:["Maximus"],count:12}) / arcade.setMvp(null) — marquee MVP
 //   arcade.setDevDeploy({actor:"Maximus"}) / arcade.setDevDeploy(null) — feed header
-//   arcade.setWau() / arcade.setWau(undefined, true) / arcade.setWau(null, true)
-//     — sample success / stale / unavailable WUU states
+//   arcade.setWau() / arcade.setWau(undefined, true) / arcade.setWau(null)
+//     — sample success / stale / unavailable WUU states, drawn as a push would be
 //   arcade.setStatus({fetchedAt, services:[{name:"GITHUB", level:"minor", text:"..."}]})
 //     / arcade.setStatus(null) — Status panel lights, (data, true) for stale
+//   (with the socket down both panels draw stale whatever you pass)
 //   arcade.setHeadlines(["A very important AI headline"]) — bottom news ticker
 //   ?theme=arcade — load in a theme from public/themes (arcade is the pre-reskin
 //     look a Target Hit puts on until midnight); the server's snapshot `theme`
@@ -2402,8 +2407,8 @@ window.arcade = {
   play,
   setMvp,
   setDevDeploy,
-  setWau: (data, stale = false) => renderWau(data === undefined ? sampleWau : data, stale),
-  setStatus: renderStatus,
+  setWau: (data = sampleWau, stale = false) => renderWau(data && { ...data, stale }),
+  setStatus: (data, stale = false) => renderStatus(data && { ...data, stale }),
   setHeadlines: renderHeadlines,
   event: handleMessage,
   demo() {
