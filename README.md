@@ -166,7 +166,8 @@ Don't put anything private in them, unless the Funnel is scoped to the webhook w
 first-name map. `devDeployWorkflow` is the file name of the deploy-to-dev
 workflow whose last successful run names who's in dev. `newsFeedUrl` is the RSS
 or Atom feed shown in the bottom ticker; the example uses TechCrunch's AI feed.
-Feeds larger than 1 MiB are rejected. `theme` is the default Theme (see
+Feeds larger than 1 MiB are rejected. `reviewers` is the list of GitHub logins
+the Review Queue panel tracks. `theme` is the default Theme (see
 [Themes](#themes)). The server won't start without the file.
 
 It is **gitignored** — it names your repos and your team, so it stays out of a

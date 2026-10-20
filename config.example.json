@@ -16,6 +16,10 @@
     "octocat": "Mona",
     "some-github-login": "Firstname"
   },
+  "reviewers": [
+    "brandon-nextwork",
+    "loheth-nextwork"
+  ],
   "devDeployWorkflow": "env-dev.yaml",
   "newsFeedUrl": "https://techcrunch.com/category/artificial-intelligence/feed/",
   "theme": "kernel"

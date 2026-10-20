@@ -52,7 +52,6 @@ export default {
     family: (fontSize) => (fontSize >= 34 ? FONT_DISPLAY : FONT_UI),
     weight: "700",
     tracking: (fontSize) => (fontSize >= 34 ? Math.round(fontSize * -0.01) : 0),
-    pillTracking: undefined,
     valueTracking: undefined,
     nameMax: 12,
     display: FONT_DISPLAY,
@@ -78,13 +77,14 @@ export default {
       wau: { fill: KERNEL["accent-emerald"], ink: INK, size: 30, bar: 58.5 },
       // Same bar as the Feed's, so the two headers side by side line up.
       status: { fill: KERNEL["accent-plum"], ink: KERNEL["white"], size: 32, bar: 62.5 },
+      // A size down: REVIEW QUEUE at 32 runs past its 300px panel.
+      reviews: { fill: KERNEL["accent-pumpkin"], ink: INK, size: 28, bar: 62.5 },
     },
-    // Event names, IN DEV, repo pills, the MVP tally and the takeover credit as
-    // filled stickers. Ink text on every fill except these darker ones.
+    // IN DEV, the MVP tally and the takeover credit as filled stickers. Ink text
+    // on every fill except these darker ones.
     chips: {
-      whiteOn: [palette.info, palette.red, palette.magenta, palette.dim, INK],
+      whiteOn: [INK],
       dev: KERNEL["accent-emerald"],
-      pill: PINK,
       tally: PINK,
       credit: KERNEL["accent-emerald"],
       news: INK,

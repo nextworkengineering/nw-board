@@ -246,3 +246,21 @@ test("closed-list failure keeps the open PRs", async () => {
     warn.mockRestore();
   }
 });
+
+test("onOpen hears each repo's open list as read, and nothing for a repo whose read failed", async () => {
+  const OTHER = "example-org/features";
+  const open = [{ number: 1, title: "Open", created_at: ago(HOUR), updated_at: ago(HOUR) }];
+  const heard: [string, unknown[]][] = [];
+  const { get } = fakeGet({
+    [OPEN]: open,
+    [`${OTHER}/pulls?state=open&per_page=100`]: new Error("GitHub API 502"),
+  });
+  const { reconcile } = createHistory({
+    get,
+    now: () => NOW,
+    repos: [REPO, OTHER],
+    onOpen: (repo, list) => heard.push([repo, list]),
+  });
+  await reconcile();
+  expect(heard).toEqual([[REPO, open]]);
+});

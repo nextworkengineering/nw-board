@@ -39,7 +39,6 @@ export default {
     family: () => FONT_ARCADE,
     weight: "normal",
     tracking: () => 2,
-    pillTracking: 1,
     // Untracked in the Arcade Theme too: tracked monospace runs "2.4k" wider than
     // its 38px bar and into the neighbour's value.
     valueTracking: 0,

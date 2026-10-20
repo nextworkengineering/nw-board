@@ -4,7 +4,8 @@ import { startOfWeek } from "./clock.ts";
  * What happened in the Tracked Repos since some moment, read back from the GitHub API
  * as domain events. Startup Backfill and the 60 s Reconcile are two schedules over this
  * one read; they differ only in how far back they look. Neither records anything —
- * the caller does, and its dedup is what lets every successful webhook win.
+ * the caller does, and its dedup is what lets every successful webhook win. The caller
+ * also hears each repo's open PRs as read (onOpen), for state the events don't carry.
  */
 
 export type DomainEvent = {
@@ -21,6 +22,9 @@ export type Happening = { at: number; event: DomainEvent };
 
 /** GET a path under /repos, e.g. "owner/name/actions/runs"; throws on a non-2xx. */
 export type GitHubGet = (path: string) => Promise<any>;
+
+/** Told a repo's open PRs after each successful read of them; a failed read tells nothing. */
+export type OnOpen = (repo: string, open: any[]) => void;
 
 /** The login of whoever GitHub named, or "" when it named nobody. */
 export const login = (who: any) => who?.login ?? "";
@@ -40,6 +44,7 @@ async function happened(
   get: GitHubGet,
   repos: string[],
   caller: string,
+  onOpen: OnOpen,
   { since, until = Infinity, reviewsSince = since }: { since: number; until?: number; reviewsSince?: number },
 ): Promise<Happening[]> {
   const found: Happening[] = [];
@@ -52,7 +57,9 @@ async function happened(
 
   for (const repo of repos) {
     try {
-      const prs: any[] = [...(await get(`${repo}/pulls?state=open&per_page=100`))];
+      const open: any[] = await get(`${repo}/pulls?state=open&per_page=100`);
+      onOpen(repo, open);
+      const prs = [...open];
       let closed: any[] = [];
       try {
         // ponytail: one page per repo — the ceiling is 100 closed PRs per repo per
@@ -100,8 +107,21 @@ async function happened(
   return found.sort((a, b) => a.at - b.at);
 }
 
-/** The Tracked Repos' history over an injected GitHub GET and clock. */
-export function createHistory({ get, now, repos }: { get: GitHubGet; now: () => number; repos: string[] }) {
+/**
+ * The Tracked Repos' history over an injected GitHub GET and clock. `onOpen` hears
+ * every open-PR list either schedule reads (the Review Queue is built from them).
+ */
+export function createHistory({
+  get,
+  now,
+  repos,
+  onOpen = () => {},
+}: {
+  get: GitHubGet;
+  now: () => number;
+  repos: string[];
+  onOpen?: OnOpen;
+}) {
   return {
     /**
      * Startup Backfill: back to the start of the week or the last 24h, whichever is
@@ -111,7 +131,7 @@ export function createHistory({ get, now, repos }: { get: GitHubGet; now: () => 
      * to Monday 00:00 leaves the Feed blank for everything the weekend still owes it.
      */
     backfill: () =>
-      happened(get, repos, "Backfill", { since: Math.min(startOfWeek(now()), now() - DAY_MS) }),
+      happened(get, repos, "Backfill", onOpen, { since: Math.min(startOfWeek(now()), now() - DAY_MS) }),
 
     /**
      * Reconcile: the last 24h, but never before Monday 00:00 — the dedup set forgets
@@ -119,7 +139,7 @@ export function createHistory({ get, now, repos }: { get: GitHubGet; now: () => 
      * events as if they had been missed.
      */
     reconcile: async () => {
-      const found = await happened(get, repos, "Reconcile", {
+      const found = await happened(get, repos, "Reconcile", onOpen, {
         since: Math.max(startOfWeek(now()), now() - DAY_MS),
         // A webhook a few seconds behind its event must still win, or its sound and
         // the merger's MVP credit go to a silent author-credited recovery instead.
