@@ -287,6 +287,16 @@ test("a display connecting receives a snapshot of the Feed reflecting earlier ev
     theme: "kernel",
     // No clip assigned to any slot, so the board plays its defaults.
     sounds: {},
+    // A test reaches no status page, so every row reads UNAVAILABLE, fresh at boot.
+    status: {
+      fetchedAt: new Date(IN_THE_SOUND_WINDOW).toISOString(),
+      services: ["GITHUB", "SENTRY", "GCP"].map((name) => ({
+        name,
+        level: "unknown",
+        text: "UNAVAILABLE",
+      })),
+      stale: false,
+    },
     // Snapshot entries carry the server timestamp they were recorded at, so a
     // display can expire them itself rather than restamping them on receipt.
     feed: [

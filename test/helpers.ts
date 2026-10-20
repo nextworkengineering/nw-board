@@ -20,6 +20,16 @@ process.env.ADMIN_PORT = "0";
 // Backfill is backfill.test.ts's business (it sets its own token). Without a token
 // no other test can reach the real GitHub API with whatever PAT the shell exported.
 delete process.env.GITHUB_TOKEN;
+// Every server reads Service Status from boot. No test reaches the internet: anything
+// off loopback fails at once, so a server whose test never stubbed statusUrls reads its
+// rows UNAVAILABLE instead of depending on (or waiting for) the real status pages.
+const realFetch = globalThis.fetch;
+globalThis.fetch = (input, init) => {
+  const { hostname } = new URL(input instanceof Request ? input.url : input);
+  return ["127.0.0.1", "localhost", "[::1]"].includes(hostname)
+    ? realFetch(input, init)
+    : Promise.reject(new Error(`a test reached for ${hostname}`));
+};
 
 export const fixture = (name: string) =>
   readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");

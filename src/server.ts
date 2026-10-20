@@ -20,6 +20,9 @@ import express, { type ErrorRequestHandler, type RequestHandler } from "express"
 import { WebSocketServer } from "ws";
 import { createHistory, login, type DomainEvent } from "./backfill.ts";
 import { cycleDay, dayKey, localDate, nextMidnight, startOfDay, startOfWeek } from "./clock.ts";
+import { createMonitor, type Reading } from "./monitor.ts";
+import { statusReader, type ServiceStatus } from "./status.ts";
+import { limitedText } from "./upstream.ts";
 
 /** Translate a GitHub delivery into the domain vocabulary. Anything else is ignored. */
 function toDomainEvent(
@@ -174,8 +177,10 @@ type Options = {
   posthogTimeoutMs?: number;
   /** The upstream status pages; tests point these at stubs. */
   statusUrls?: { github?: string; sentry?: string; gcp?: string };
-  /** How long the status proxy waits for each status page. */
+  /** How long a Service Status read waits for each status page. */
   statusTimeoutMs?: number;
+  /** How often Service Status is read; tests shorten it. */
+  statusIntervalMs?: number;
   /** The Admin Console's loopback-only port; 0 picks a free one. */
   adminPort?: number;
   /** The Sound Library root (built-ins, plus uploads/); tests point this at a temp dir. */
@@ -204,7 +209,6 @@ const isTheme = (name: unknown): name is string =>
   name !== "index" &&
   existsSync(`${THEMES_DIR}${name}.js`);
 
-const UPSTREAM_MAX_BYTES = 1024 * 1024;
 const POSTHOG_PROJECT = 196853;
 const POSTHOG_DASHBOARD = 1468050;
 const WAU_TILES = {
@@ -214,60 +218,6 @@ const WAU_TILES = {
   activationPercent: 10992630,
   daily: 7119735,
 } as const;
-
-const STATUS_URLS = {
-  github: "https://www.githubstatus.com/api/v2/status.json",
-  sentry: "https://status.sentry.io/api/v2/status.json",
-  gcp: "https://status.cloud.google.com/incidents.json",
-};
-// Cloud Run, Google Cloud Storage, Cloud Firestore — the GCP products we run on.
-const GCP_PRODUCTS = ["9D7d2iNBQWN24zc1VamE", "UwaYoXQ5bHYHG6EdiPB8", "CETSkT92V21G6A1x28me"];
-// GCP lists a worldwide incident under an explicit "global" location.
-const GCP_REGIONS = ["us-central1", "us-east1", "us-west1", "global"];
-const GCP_SEVERITY = ["low", "medium", "high"];
-
-type StatusLevel = "ok" | "minor" | "major" | "unknown";
-
-/** A Statuspage summary (GitHub, Sentry). Maintenance counts as minor, not ok. */
-function normalizeStatuspage(payload: any): { level: StatusLevel; text: string } {
-  const { indicator, description } = payload?.status ?? {};
-  if (typeof indicator !== "string" || typeof description !== "string")
-    throw new Error("status page has no indicator");
-  const level =
-    indicator === "none"
-      ? "ok"
-      : indicator === "major" || indicator === "critical"
-        ? "major"
-        : "minor";
-  // A healthy row reads the same for every service, and fits the narrow panel.
-  return { level, text: level === "ok" ? "OPERATIONAL" : description.toUpperCase() };
-}
-
-/**
- * GCP's incident history, narrowed to open incidents on our products that reach our
- * regions. No current locations means the incident has recovered, so it does not count.
- */
-function normalizeGcpIncidents(payload: any): { level: StatusLevel; text: string } {
-  if (!Array.isArray(payload)) throw new Error("GCP incidents is not a list");
-  const relevant = payload.filter(
-    (incident: any) =>
-      !incident?.end &&
-      incident?.affected_products?.some?.((product: any) => GCP_PRODUCTS.includes(product?.id)) &&
-      incident?.currently_affected_locations?.some?.((location: any) =>
-        GCP_REGIONS.includes(location?.id),
-      ),
-  );
-  if (relevant.length === 0) return { level: "ok", text: "OPERATIONAL" };
-  const rank = (incident: any) => GCP_SEVERITY.indexOf(incident.severity);
-  const worst = relevant.reduce((a: any, b: any) => (rank(b) > rank(a) ? b : a));
-  return {
-    level: worst.severity === "high" ? "major" : "minor",
-    text:
-      typeof worst.status_impact === "string"
-        ? worst.status_impact.replaceAll("_", " ")
-        : "INCIDENT",
-  };
-}
 
 function normalizeWauDashboard(payload: any) {
   const tiles = Array.isArray(payload) ? payload : payload?.results;
@@ -321,24 +271,6 @@ function onTarget(wau: { currentWau: number; targetWau: number }, elapsedDays: n
   if (expected <= 0) return "on";
   const ratio = wau.currentWau / expected;
   return ratio >= 0.9 ? "on" : ratio >= 0.7 ? "behind" : "far-behind";
-}
-
-async function limitedText(response: Response, complaint = "news feed exceeds 1 MiB") {
-  if (!response.body) return "";
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let bytes = 0;
-  let text = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) return text + decoder.decode();
-    bytes += value.byteLength;
-    if (bytes > UPSTREAM_MAX_BYTES) {
-      await reader.cancel();
-      throw new Error(complaint);
-    }
-    text += decoder.decode(value, { stream: true });
-  }
 }
 
 export async function startServer(port: number, options: Options = {}) {
@@ -699,33 +631,12 @@ export async function startServer(port: number, options: Options = {}) {
     }
   });
 
-  // Same-origin proxy for the status panel. Destinations are fixed, and each service
-  // fails on its own: one status page down shows that row UNAVAILABLE, not a 502.
-  app.get("/status.json", async (_req, res) => {
-    const read = async (url: string) => {
-      const response = await fetch(url, {
-        headers: { accept: "application/json" },
-        signal: AbortSignal.timeout(options.statusTimeoutMs ?? 5_000),
-      });
-      if (!response.ok) throw new Error(`returned ${response.status}`);
-      return JSON.parse(await limitedText(response, "status response exceeds 1 MiB"));
-    };
-    const services = [
-      { name: "GITHUB", url: options.statusUrls?.github ?? STATUS_URLS.github, normalize: normalizeStatuspage },
-      { name: "SENTRY", url: options.statusUrls?.sentry ?? STATUS_URLS.sentry, normalize: normalizeStatuspage },
-      { name: "GCP", url: options.statusUrls?.gcp ?? STATUS_URLS.gcp, normalize: normalizeGcpIncidents },
-    ];
-    const results = await Promise.allSettled(
-      services.map(async ({ url, normalize }) => normalize(await read(url))),
-    );
-    res.set("Cache-Control", "no-store").json({
-      fetchedAt: new Date().toISOString(),
-      services: results.map((result, i) => {
-        if (result.status === "fulfilled") return { name: services[i].name, ...result.value };
-        console.warn(`${services[i].name} status unavailable: ${result.reason}`);
-        return { name: services[i].name, level: "unknown", text: "UNAVAILABLE" };
-      }),
-    });
+  // Service Status as the displays were last told it, for curl through the Funnel. Never
+  // an upstream call per request: the Monitor below reads the status pages once a minute.
+  app.get("/status.json", (_req, res) => {
+    const body = statusBody();
+    if (body) res.set("Cache-Control", "no-store").json(body);
+    else res.sendStatus(502); // no reading yet
   });
 
   // The credential stays on the server and the destination is fixed: the kiosk can
@@ -934,7 +845,8 @@ export async function startServer(port: number, options: Options = {}) {
   //   on connect: {"type":"snapshot","feed":[{<domain event>, "at":<ms>}, ...],
   //                "mvp":{"names":[<string>, ...],"count":<number>}|null,
   //                "devDeploy":{"actor":<string>,"at":<ms>,"repo":<string>,"run":<number>}|null,
-  //                "theme":<string>, "sounds":{"<slot>":"sounds/<path>.mp3", ...}}
+  //                "theme":<string>, "sounds":{"<slot>":"sounds/<path>.mp3", ...},
+  //                "status":<Service Status>|null}
   //               feed is oldest first and holds the last 24h, each entry stamped with
   //               the server time it happened; mvp names all Actors tied for today's
   //               lead, null until today has an event; devDeploy is the last teammate
@@ -946,8 +858,9 @@ export async function startServer(port: number, options: Options = {}) {
   //               itself (the Admin Console's /api/theme does the same); sounds maps
   //               each slot (a SAMPLES key in public/audio.js) the Admin Console has
   //               assigned to a Sound Library clip, so the board plays it instead of the
-  //               slot's default — an unassigned slot is absent. Each change is pushed as
-  //               a fresh snapshot.
+  //               slot's default — an unassigned slot is absent; status is the last
+  //               Service Status reading, null until the first read lands (as below). Each
+  //               change is pushed as a fresh snapshot.
   //   live:       <domain event> = {"type":"pr-merged"|..., repo, number, title, actor}
   //               actor is the GitHub login of whoever did it (the merger for a
   //               pr-merged, the reviewer for a review, the commenter for a comment),
@@ -972,8 +885,15 @@ export async function startServer(port: number, options: Options = {}) {
   //               at most once a local day: a Celebration with no PR, "audible" gated by
   //               Quiet Hours. Also sent on demand by a loopback POST
   //               /wau-target-hit, with today's row from the last read.
-  // No domain event type is called "snapshot", "day-chime", "wau-target-hit", "reminder" or
-  // "scheduled-celebration", so `type` tells them apart.
+  //   status:     {"type":"status","status":<Service Status>} where <Service Status> =
+  //               {"fetchedAt":<ISO>,"services":[{"name":"GITHUB"|"SENTRY"|"GCP",
+  //               "level":"ok"|"minor"|"major"|"unknown","text":<string>}, ...],
+  //               "stale":true|false} — the status pages read once a minute, pushed only
+  //               when a row or "stale" changes. fetchedAt is the last good read; stale
+  //               turns true once that is over two minutes old (reads failing, or held by a 429).
+  //               GET /status.json serves the same body.
+  // No domain event type is called "snapshot", "day-chime", "wau-target-hit", "reminder",
+  // "scheduled-celebration" or "status", so `type` tells them apart.
   const broadcast = (message: unknown) => {
     for (const client of wss.clients) client.send(JSON.stringify(message));
   };
@@ -986,8 +906,23 @@ export async function startServer(port: number, options: Options = {}) {
     sounds: Object.fromEntries(
       Object.entries(soundSlots).map(([slot, path]) => [slot, `sounds/${path}`]),
     ),
+    status: statusBody(),
   });
   wss.on("connection", (socket) => socket.send(JSON.stringify(snapshot())));
+
+  // Service Status, read here rather than by each display: one set of upstream calls a
+  // minute however many screens (and Funnel curls) are watching, pushed on change.
+  const statusMonitor = createMonitor({
+    name: "Service Status",
+    read: statusReader({ urls: options.statusUrls, timeoutMs: options.statusTimeoutMs }),
+    intervalMs: options.statusIntervalMs ?? 60_000,
+    now,
+    onChange: (reading) => broadcast({ type: "status", status: statusBody(reading) }),
+  });
+  /** What the push, the snapshot and /status.json carry: the reading, flattened; null before the first. */
+  function statusBody(reading: Reading<ServiceStatus> | undefined = statusMonitor.current()) {
+    return reading ? { fetchedAt: reading.fetchedAt, ...reading.value, stale: reading.stale } : null;
+  }
 
   const token = process.env.GITHUB_TOKEN;
   const apiBase = options.githubApiBase ?? "https://api.github.com";
@@ -1344,9 +1279,14 @@ export async function startServer(port: number, options: Options = {}) {
       })
       .listen(options.adminPort ?? Number(process.env.ADMIN_PORT ?? 3001), "127.0.0.1", resolve),
   );
-  await backfill().catch((error) =>
-    console.warn(`Backfill failed, serving live events only: ${error}`),
-  );
+  // The first Service Status read started with its Monitor; wait for it alongside
+  // Backfill so the boot snapshot (and /status.json) has the panel too.
+  await Promise.all([
+    backfill().catch((error) =>
+      console.warn(`Backfill failed, serving live events only: ${error}`),
+    ),
+    statusMonitor.current() ?? statusMonitor.refresh(),
+  ]);
   broadcast(snapshot());
 
   const reconciliation = setInterval(
@@ -1417,6 +1357,7 @@ export async function startServer(port: number, options: Options = {}) {
       new Promise<void>((resolve) => {
         clearInterval(scheduler);
         clearInterval(reconciliation);
+        statusMonitor.stop();
         for (const client of wss.clients) client.terminate();
         adminHttp.close();
         http.close(() => resolve());
