@@ -17,9 +17,18 @@ process.env.GITHUB_WEBHOOK_SECRET = SECRET;
 // Every server also opens the Admin Console listener; on its default 3001, parallel
 // test files would collide over it, so each one gets a free port instead.
 process.env.ADMIN_PORT = "0";
+// And the board itself listens on 127.0.0.1, the address every test connects to, not
+// on every interface. On macOS a free port for the wildcard [::] can be one another
+// test file's stub already holds on 127.0.0.1, and a connection to 127.0.0.1 then
+// reaches that stub instead of this board: a 401 on a display's connect, a socket
+// closed mid-request, another file's WUU numbers. Both on 127.0.0.1, the kernel never
+// hands out a port that is taken.
+process.env.LISTEN_HOST = "127.0.0.1";
 // Backfill is backfill.test.ts's business (it sets its own token). Without a token
 // no other test can reach the real GitHub API with whatever PAT the shell exported.
 delete process.env.GITHUB_TOKEN;
+// Likewise the WUU panel is wau.test.ts's business: no other server reads PostHog.
+delete process.env.POSTHOG_PERSONAL_API_KEY;
 // Every server reads Service Status from boot. No test reaches the internet: anything
 // off loopback fails at once, so a server whose test never stubbed statusUrls reads its
 // rows UNAVAILABLE instead of depending on (or waiting for) the real status pages.

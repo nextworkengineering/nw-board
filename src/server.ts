@@ -19,10 +19,11 @@ import { promisify } from "node:util";
 import express, { type ErrorRequestHandler, type RequestHandler } from "express";
 import { WebSocketServer } from "ws";
 import { createHistory, login, type DomainEvent } from "./backfill.ts";
-import { cycleDay, dayKey, localDate, nextMidnight, startOfDay, startOfWeek } from "./clock.ts";
+import { cycleDay, localDate, nextMidnight, startOfDay, startOfWeek } from "./clock.ts";
 import { createMonitor, type Reading } from "./monitor.ts";
 import { statusReader, type ServiceStatus } from "./status.ts";
 import { limitedText } from "./upstream.ts";
+import { wauPayload, wauReader } from "./wau.ts";
 
 /** Translate a GitHub delivery into the domain vocabulary. Anything else is ignored. */
 function toDomainEvent(
@@ -173,8 +174,10 @@ type Options = {
   newsTimeoutMs?: number;
   /** Root of the PostHog API; tests point this at a stub. */
   posthogApiBase?: string;
-  /** How long the WUU dashboard proxy waits for PostHog's cached read. */
+  /** How long each PostHog query or tile read waits. */
   posthogTimeoutMs?: number;
+  /** How often WUU is read; tests shorten it. */
+  wauIntervalMs?: number;
   /** The upstream status pages; tests point these at stubs. */
   statusUrls?: { github?: string; sentry?: string; gcp?: string };
   /** How long a Service Status read waits for each status page. */
@@ -208,70 +211,6 @@ const isTheme = (name: unknown): name is string =>
   /^[a-z0-9-]+$/.test(name) &&
   name !== "index" &&
   existsSync(`${THEMES_DIR}${name}.js`);
-
-const POSTHOG_PROJECT = 196853;
-const POSTHOG_DASHBOARD = 1468050;
-const WAU_TILES = {
-  currentWau: 7119738,
-  targetWau: 7119740,
-  targetPercent: 7122309,
-  activationPercent: 10992630,
-  daily: 7119735,
-} as const;
-
-function normalizeWauDashboard(payload: any) {
-  const tiles = Array.isArray(payload) ? payload : payload?.results;
-  if (!Array.isArray(tiles)) throw new Error("PostHog dashboard has no results list");
-  const result = (id: number) => {
-    const value = tiles.find((tile: any) => tile?.id === id)?.insight?.result;
-    if (!Array.isArray(value)) throw new Error(`PostHog tile ${id} has no result`);
-    return value;
-  };
-  const number = (value: unknown, name: string) => {
-    const parsed = typeof value === "string" ? Number(value.replace(/%$/, "")) : value;
-    if (typeof parsed !== "number" || !Number.isFinite(parsed))
-      throw new Error(`PostHog ${name} is not numeric`);
-    return parsed;
-  };
-  const scalar = (id: number, name: string) => number(result(id)?.[0]?.[0], name);
-  // Rows arrive ordered Day 1..7 of the Sat–Fri cycle; the first column is a free
-  // label (the insight has carried "Day 1" and "Saturday" so far) and extra
-  // columns are ignored, so an edit to the saved query cannot 502 the board.
-  const daily = result(WAU_TILES.daily).map((row: unknown, index: number) => {
-    if (!Array.isArray(row)) throw new Error("PostHog daily WUU row is malformed");
-    return {
-      day: index + 1,
-      label: String(row[0]),
-      current: number(row[1], `daily day ${index + 1} current`),
-      previous: number(row[2], `daily day ${index + 1} previous`),
-    };
-  });
-  if (daily.length !== 7) throw new Error("PostHog daily WUU result must contain 7 days");
-  return {
-    fetchedAt: new Date().toISOString(),
-    currentWau: scalar(WAU_TILES.currentWau, "current WUU"),
-    targetWau: scalar(WAU_TILES.targetWau, "target WUU"),
-    targetPercent: scalar(WAU_TILES.targetPercent, "target percent"),
-    activationPercent: scalar(WAU_TILES.activationPercent, "activation percent"),
-    daily,
-  };
-}
-
-/**
- * On pace for the weekly target? The pace is flat, target ÷ 168 an hour since
- * Saturday midnight local, computed as `elapsedDays` into the Sat–Fri cycle ÷ 7 so a
- * DST week's 167 or 169 hours is ignored: the week-to-date WUU should be
- * target × elapsedDays / 7.
- * ponytail: just after Saturday midnight `expected` is tiny, so the light swings on a
- * handful of users (or ingestion lag), and it judges PostHog's cached numbers against
- * the current clock; add a grace window if anyone watches then.
- */
-function onTarget(wau: { currentWau: number; targetWau: number }, elapsedDays: number) {
-  const expected = (wau.targetWau * elapsedDays) / 7;
-  if (expected <= 0) return "on";
-  const ratio = wau.currentWau / expected;
-  return ratio >= 0.9 ? "on" : ratio >= 0.7 ? "behind" : "far-behind";
-}
 
 export async function startServer(port: number, options: Options = {}) {
   const secret = process.env.GITHUB_WEBHOOK_SECRET;
@@ -639,14 +578,6 @@ export async function startServer(port: number, options: Options = {}) {
     else res.sendStatus(502); // no reading yet
   });
 
-  // The credential stays on the server and the destination is fixed: the kiosk can
-  // read the five saved insights, but it cannot turn this route into a general proxy.
-  let lastWau: ReturnType<typeof normalizeWauDashboard> | undefined;
-  let warming = false;
-  let wauAsked = 0;
-  let wauApplied = 0;
-  let celebratedOn = "";
-  let lastWauDay = "";
   // The Theme worn now: config.theme, unless a live override still holds. Every live
   // override — a Target Hit's Arcade Theme or a POST /theme?name= — lasts until the
   // next local midnight or a DELETE /theme. Last write wins, and a ?permanent switch
@@ -655,96 +586,13 @@ export async function startServer(port: number, options: Options = {}) {
   let live: { name: string; until: number } | null = null;
   const theme = () => (live && now() < live.until ? live.name : defaultTheme);
   const wearUntilMidnight = (name: string) => (live = { name, until: nextMidnight(now()) });
-  app.get("/wau.json", async (_req, res) => {
-    const asked = ++wauAsked;
-    // Index into `daily` (Sat=0 … Fri=6) by the Pi's local clock; the normaliser has none.
-    // Read after the fetch, so a read that spans midnight counts for the new day.
-    // `elapsed` adds the fraction of today gone, for the On Target pace: days since
-    // Saturday midnight on the Pi's clock (US Central).
-    const clock = () => {
-      const t = now();
-      const today = cycleDay(t);
-      const fraction = (t - startOfDay(t)) / (nextMidnight(t) - startOfDay(t));
-      return { today, dayKey: dayKey(t), elapsed: today + fraction };
-    };
-    const token = process.env.POSTHOG_PERSONAL_API_KEY;
-    if (!token) {
-      res.sendStatus(503);
-      return;
-    }
-    const base = options.posthogApiBase ?? "https://us.posthog.com";
-    const url = new URL(
-      `/api/projects/${POSTHOG_PROJECT}/dashboards/${POSTHOG_DASHBOARD}/run_insights/`,
-      base,
-    );
-    url.searchParams.set("tile_ids", Object.values(WAU_TILES).join(","));
-    url.searchParams.set("output_format", "json");
-    const headers = { authorization: `Bearer ${token}`, accept: "application/json" };
-    // Since the insights' queries were rewritten, a recompute often takes longer than
-    // any timeout the kiosk can wait out. So answer from PostHog's cache, however old,
-    // and recompute in the background so the next 15-minute poll reads fresh numbers.
-    // One recompute at a time: reloads and Funnel viewers must not stack them.
-    if (!warming) {
-      warming = true;
-      const warm = new URL(url);
-      warm.searchParams.set("refresh", "blocking");
-      fetch(warm, { headers, signal: AbortSignal.timeout(5 * 60_000) })
-        .then((response) => response.body?.cancel())
-        .catch((error) => console.warn(`WUU dashboard refresh failed: ${error}`))
-        .finally(() => (warming = false));
-    }
-    url.searchParams.set("refresh", "force_cache");
-    try {
-      const response = await fetch(url, {
-        headers,
-        signal: AbortSignal.timeout(options.posthogTimeoutMs ?? 15_000),
-      });
-      if (!response.ok) throw new Error(`PostHog returned ${response.status}`);
-      const payload = await limitedText(response, "WUU dashboard response exceeds 1 MiB");
-      const next = normalizeWauDashboard(JSON.parse(payload));
-      const { today, dayKey, elapsed } = clock();
-      // A slow read asked before the one already applied holds older cache; letting it
-      // overwrite lastWau would re-arm the crossing below.
-      if (asked < wauApplied) {
-        res
-          .set("Cache-Control", "no-store")
-          .json({ ...next, today, onTarget: onTarget(next, elapsed) });
-        return;
-      }
-      wauApplied = asked;
-      // Today's row beating the same weekday last week. Crossing only, so a restart
-      // that boots already ahead stays quiet, and once per local day. A read from an
-      // earlier day counts as behind: on Saturday its row 0 is last cycle's Saturday.
-      // ponytail: a crossing while the server is down is missed, and a restart forgets
-      // celebratedOn; persist it if a second hit the same day matters.
-      const beats = (wau: typeof next) => wau.daily[today].current > wau.daily[today].previous;
-      const wasAhead = lastWauDay === dayKey && beats(lastWau!);
-      if (lastWau && !wasAhead && beats(next) && celebratedOn !== dayKey) {
-        celebratedOn = dayKey;
-        const { label, current, previous } = next.daily[today];
-        const audible = soundAllowed();
-        console.log(
-          `WUU daily beat: ${label} ${current} > ${previous} sound=${audible ? "clip" : "silent (quiet hours)"}`,
-        );
-        wearUntilMidnight("arcade");
-        broadcast({ type: "wau-target-hit", audible, label, current, previous });
-      }
-      lastWau = next;
-      lastWauDay = dayKey;
-      res
-        .set("Cache-Control", "no-store")
-        .json({ ...lastWau, today, onTarget: onTarget(lastWau, elapsed) });
-    } catch (error) {
-      console.warn(`WUU dashboard unavailable: ${error}`);
-      // The cached read sometimes hangs or misses a tile; one bad read should not turn
-      // the panel STALE, so serve the last good numbers under their own fetchedAt.
-      if (lastWau) {
-        const { today, elapsed } = clock();
-        res
-          .set("Cache-Control", "no-store")
-          .json({ ...lastWau, today, onTarget: onTarget(lastWau, elapsed) });
-      } else res.sendStatus(502);
-    }
+  // WUU as the displays were last told it, for curl through the Funnel. Never a PostHog
+  // call per request: the Monitor below reads it once a minute. No credential, no panel.
+  app.get("/wau.json", (_req, res) => {
+    const body = wauPayload(wauMonitor?.current());
+    if (!wauMonitor) res.sendStatus(503);
+    else if (body) res.set("Cache-Control", "no-store").json(body);
+    else res.sendStatus(502); // no reading yet
   });
 
   // Routes for whoever is on the Pi itself, e.g. curl -X POST 127.0.0.1:3000/wau-target-hit.
@@ -785,10 +633,10 @@ export async function startServer(port: number, options: Options = {}) {
     broadcast(snapshot());
   };
 
-  /** Replays the Target Hit on demand, with today's row from the last WUU read. */
+  /** Replays the Target Hit on demand, with today's row from the last WUU reading. */
   const replayTargetHit = () => {
     wearUntilMidnight("arcade");
-    const row = lastWau?.daily[cycleDay(now())];
+    const row = wauMonitor?.current()?.value.daily[cycleDay(now())];
     broadcast({
       type: "wau-target-hit",
       audible: soundAllowed(),
@@ -846,7 +694,7 @@ export async function startServer(port: number, options: Options = {}) {
   //                "mvp":{"names":[<string>, ...],"count":<number>}|null,
   //                "devDeploy":{"actor":<string>,"at":<ms>,"repo":<string>,"run":<number>}|null,
   //                "theme":<string>, "sounds":{"<slot>":"sounds/<path>.mp3", ...},
-  //                "status":<Service Status>|null}
+  //                "status":<Service Status>|null, "wau":<WUU>|null}
   //               feed is oldest first and holds the last 24h, each entry stamped with
   //               the server time it happened; mvp names all Actors tied for today's
   //               lead, null until today has an event; devDeploy is the last teammate
@@ -858,9 +706,10 @@ export async function startServer(port: number, options: Options = {}) {
   //               itself (the Admin Console's /api/theme does the same); sounds maps
   //               each slot (a SAMPLES key in public/audio.js) the Admin Console has
   //               assigned to a Sound Library clip, so the board plays it instead of the
-  //               slot's default — an unassigned slot is absent; status is the last
-  //               Service Status reading, null until the first read lands (as below). Each
-  //               change is pushed as a fresh snapshot.
+  //               slot's default — an unassigned slot is absent; status and wau are
+  //               the last Service Status and WUU readings, each null until its first
+  //               read lands (wau stays null without a PostHog credential), as below.
+  //               Each change is pushed as a fresh snapshot.
   //   live:       <domain event> = {"type":"pr-merged"|..., repo, number, title, actor}
   //               actor is the GitHub login of whoever did it (the merger for a
   //               pr-merged, the reviewer for a review, the commenter for a comment),
@@ -882,9 +731,10 @@ export async function startServer(port: number, options: Options = {}) {
   //               "audible" is Quiet Hours at that minute, as for every other sound.
   //   wuu target: {"type":"wau-target-hit","audible":true|false, label, current, previous}
   //               — today's new WUU (its daily row) beating the same weekday last week,
-  //               at most once a local day: a Celebration with no PR, "audible" gated by
+  //               judged on each WUU reading whether or not a display is connected, at
+  //               most once a local day: a Celebration with no PR, "audible" gated by
   //               Quiet Hours. Also sent on demand by a loopback POST
-  //               /wau-target-hit, with today's row from the last read.
+  //               /wau-target-hit, with today's row from the last reading.
   //   status:     {"type":"status","status":<Service Status>} where <Service Status> =
   //               {"fetchedAt":<ISO>,"services":[{"name":"GITHUB"|"SENTRY"|"GCP",
   //               "level":"ok"|"minor"|"major"|"unknown","text":<string>}, ...],
@@ -892,8 +742,18 @@ export async function startServer(port: number, options: Options = {}) {
   //               when a row or "stale" changes. fetchedAt is the last good read; stale
   //               turns true once that is over two minutes old (reads failing, or held by a 429).
   //               GET /status.json serves the same body.
+  //   wau:        {"type":"wau","wau":<WUU>} where <WUU> = {"fetchedAt":<ISO>,
+  //               "currentWau":<n>,"targetWau":<n>,"targetPercent":<n>,
+  //               "activationPercent":<n>,"daily":[{"day":1..7,"label":"Saturday"…"Friday",
+  //               "current":<n>,"previous":<n>}, ...7, Saturday first],"today":0..6,
+  //               "onTarget":"on"|"behind"|"far-behind","stale":true|false} — PostHog read
+  //               once a minute on US Central days, pushed only when a number, today,
+  //               onTarget or "stale" changes; fetchedAt and stale as for status.
+  //               current/previous are each day's new WUU this week / last week; today
+  //               indexes daily. GET /wau.json serves the same body (503 without a
+  //               PostHog credential, 502 before the first reading).
   // No domain event type is called "snapshot", "day-chime", "wau-target-hit", "reminder",
-  // "scheduled-celebration" or "status", so `type` tells them apart.
+  // "scheduled-celebration", "status" or "wau", so `type` tells them apart.
   const broadcast = (message: unknown) => {
     for (const client of wss.clients) client.send(JSON.stringify(message));
   };
@@ -907,6 +767,7 @@ export async function startServer(port: number, options: Options = {}) {
       Object.entries(soundSlots).map(([slot, path]) => [slot, `sounds/${path}`]),
     ),
     status: statusBody(),
+    wau: wauPayload(wauMonitor?.current()),
   });
   wss.on("connection", (socket) => socket.send(JSON.stringify(snapshot())));
 
@@ -923,6 +784,33 @@ export async function startServer(port: number, options: Options = {}) {
   function statusBody(reading: Reading<ServiceStatus> | undefined = statusMonitor.current()) {
     return reading ? { fetchedAt: reading.fetchedAt, ...reading.value, stale: reading.stale } : null;
   }
+
+  // WUU, likewise read here once a minute for every display. The Target Hit is judged on
+  // each reading, so it fires (and the board puts the Arcade Theme on) with no display
+  // connected. The credential stays on the server and every destination is fixed.
+  const posthogToken = process.env.POSTHOG_PERSONAL_API_KEY;
+  const wauMonitor = posthogToken
+    ? createMonitor({
+        name: "WUU",
+        read: wauReader({
+          token: posthogToken,
+          base: options.posthogApiBase,
+          timeoutMs: options.posthogTimeoutMs,
+          now,
+          onTargetHit: ({ label, current, previous }) => {
+            const audible = soundAllowed();
+            console.log(
+              `WUU daily beat: ${label} ${current} > ${previous} sound=${audible ? "clip" : "silent (quiet hours)"}`,
+            );
+            wearUntilMidnight("arcade");
+            broadcast({ type: "wau-target-hit", audible, label, current, previous });
+          },
+        }),
+        intervalMs: options.wauIntervalMs ?? 60_000,
+        now,
+        onChange: (reading) => broadcast({ type: "wau", wau: wauPayload(reading) }),
+      })
+    : undefined;
 
   const token = process.env.GITHUB_TOKEN;
   const apiBase = options.githubApiBase ?? "https://api.github.com";
@@ -1267,8 +1155,9 @@ export async function startServer(port: number, options: Options = {}) {
 
   // Listen before Backfill. A deploy or crash restart must not make GitHub's webhook
   // endpoint return 502 for the whole API crawl; displays that connect in this brief
-  // window receive the completed snapshot as soon as Backfill finishes.
-  await new Promise<void>((resolve) => http.listen(port, resolve));
+  // window receive the completed snapshot as soon as Backfill finishes. Every interface
+  // unless LISTEN_HOST names one (the tests pin 127.0.0.1; see test/helpers.ts).
+  await new Promise<void>((resolve) => http.listen(port, process.env.LISTEN_HOST, resolve));
   // A console that can't listen (its port taken, say) must not take the board and the
   // webhooks down with it.
   await new Promise<void>((resolve) =>
@@ -1279,13 +1168,14 @@ export async function startServer(port: number, options: Options = {}) {
       })
       .listen(options.adminPort ?? Number(process.env.ADMIN_PORT ?? 3001), "127.0.0.1", resolve),
   );
-  // The first Service Status read started with its Monitor; wait for it alongside
-  // Backfill so the boot snapshot (and /status.json) has the panel too.
+  // The first Service Status and WUU reads started with their Monitors; wait for them
+  // alongside Backfill so the boot snapshot (and /status.json, /wau.json) has the panels too.
   await Promise.all([
     backfill().catch((error) =>
       console.warn(`Backfill failed, serving live events only: ${error}`),
     ),
     statusMonitor.current() ?? statusMonitor.refresh(),
+    wauMonitor && (wauMonitor.current() ?? wauMonitor.refresh()),
   ]);
   broadcast(snapshot());
 
@@ -1358,6 +1248,7 @@ export async function startServer(port: number, options: Options = {}) {
         clearInterval(scheduler);
         clearInterval(reconciliation);
         statusMonitor.stop();
+        wauMonitor?.stop();
         for (const client of wss.clients) client.terminate();
         adminHttp.close();
         http.close(() => resolve());

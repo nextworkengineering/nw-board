@@ -297,6 +297,8 @@ test("a display connecting receives a snapshot of the Feed reflecting earlier ev
       })),
       stale: false,
     },
+    // No PostHog credential in a test, so no WUU panel.
+    wau: null,
     // Snapshot entries carry the server timestamp they were recorded at, so a
     // display can expire them itself rather than restamping them on receipt.
     feed: [
