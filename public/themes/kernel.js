@@ -49,7 +49,6 @@ export default {
     family: (fontSize) => (fontSize >= 54 ? FONT_DISPLAY : FONT_UI),
     weight: "500",
     tracking: (fontSize) => (fontSize >= 54 ? Math.round(fontSize * -0.01) : 0),
-    pillTracking: undefined,
     valueTracking: undefined,
     nameMax: 12,
   },

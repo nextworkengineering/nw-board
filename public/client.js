@@ -64,17 +64,18 @@ const face = (name, fontSize, em = 0, extra) =>
 // themes keep the full-width board.
 const SHADOW = T.decorations.hardShadow ?? 0;
 const PANEL_W = SHADOW ? 1864 : 1872;
-// The Feed gives up its right-hand 316px to the Status panel: 300 wide, 16 apart.
-const FEED_W = PANEL_W - 316;
+// The Feed gives up its right-hand 632px to the Review Queue and Status panels:
+// 300 wide each, 16 apart.
+const FEED_W = PANEL_W - 632;
 const chips = T.decorations.chips;
 
 const EVENTS = {
-  "pr-merged": { name: "MERGED", color: C.amber, icon: "trophy" },
-  "review-approved": { name: "APPROVED", color: C.green, icon: "check" },
-  "pr-opened": { name: "OPENED", color: C.info, icon: "rocket" },
-  "pr-closed": { name: "CLOSED", color: C.dim, icon: "crate" },
-  "changes-requested": { name: "CHANGES", color: C.red, icon: "bang" },
-  "pr-comment": { name: "COMMENT", color: C.magenta, icon: "bubble" },
+  "pr-merged": { icon: "trophy" },
+  "review-approved": { icon: "check" },
+  "pr-opened": { icon: "rocket" },
+  "pr-closed": { icon: "crate" },
+  "changes-requested": { icon: "bang" },
+  "pr-comment": { icon: "bubble" },
 };
 const CELEBRATIONS = new Set(["pr-merged", "review-approved"]);
 
@@ -667,14 +668,20 @@ setInterval(() => {
     .toUpperCase();
   if (wallClock.text !== t) wallClock.text = t;
 }, 1000);
-// The last human to deploy to dev, centred on the header: the board answers
-// "who put that on dev?" without anyone opening GitHub.
+// The last human to deploy to dev, centred in the header's free run between the
+// heading and the widest clock (on the panel's centre the Arcade Theme's wide
+// heading runs into it): the board answers "who put that on dev?" without anyone
+// opening GitHub.
+const feedHeading = feedPanel.children.find((child) => child instanceof Text);
+wallClock.text = "12:59 PM";
+const DEV_X = Math.round((feedHeading.x + feedHeading.width + wallClock.x - wallClock.width) / 2);
+wallClock.text = "";
 const devDeployLabel = label("", chips ? 26 : 34, chips ? C.ink : C.green, face("display", 26, 0, { lineHeight: 32 }));
 devDeployLabel.anchor.set(0.5, 0);
-devDeployLabel.position.set(FEED_W / 2, 12);
+devDeployLabel.position.set(DEV_X, 12);
 if (feedHeader) {
   devDeployLabel.anchor.set(0.5);
-  devDeployLabel.position.set(FEED_W / 2, feedHeader.bar / 2);
+  devDeployLabel.position.set(DEV_X, feedHeader.bar / 2);
 }
 const devDeployChip = new Graphics();
 feedPanel.addChild(devDeployChip, devDeployLabel);
@@ -697,46 +704,28 @@ feedPanel.addChild(feedEmpty);
 // the old rows down a line instead of re-rasterising every Text on the panel.
 const feedRows = Array.from({ length: FEED_ROWS }, (_, i) => {
   const row = new Container();
-  // Neobrutal: Paper's 26px inset, columns 24px apart, everything centred on its
-  // 52px row.
+  // Neobrutal: Paper's 26px inset, everything centred on its 52px row.
   row.position.set(chips ? 31 : 20, ROW_Y + i * ROW_PITCH);
   row.visible = false;
   const icon = pixelSprite("star", 4);
   icon.position.set(24, 22);
-  // Neobrutal's event name is a sticker instead, so it takes the icon's slot.
-  icon.visible = !chips;
-  const kindChip = new Graphics();
-  const kind = label("", chips ? 24 : 28, C.ink, face("display", 24, 0, { lineHeight: 30 }));
-  kind.position.set(chips ? 16 : 56, chips ? 11 : 8);
   // First names are short, so the name and time sit tight together and the
-  // title gets everything to the right of the repo pill.
-  // Columns sized for the 28px register: APPROVED (the widest kind) ends near
-  // x196, so the name column starts at 240 with air to spare.
+  // title gets everything to their right.
+  // Columns sized for the 28px register: name and time share the same 316px run
+  // as before, which a real first name clears.
   const who = label("", 28, C.ink);
-  who.position.set(chips ? 212 : 240, 8);
+  who.position.set(64, 8);
   // Right-anchored: FK Grotesk's digits are proportional, so a left-anchored
   // HH:MM column wanders by up to 30px across twelve rows. Anchoring right puts
   // the ragged edge where the eye is not tracking a column.
   const time = label("", 28, C.dim);
   time.anchor.set(1, 0);
-  time.position.set(chips ? 529 : 556, 8);
-  // Repo pill: a small rounded chip redrawn per render (width follows the text).
-  const pillBg = new Graphics();
-  const pillText = label(
-    "",
-    20,
-    chips ? C.ink : C.dim,
-    face("ui", 20, 0, { lineHeight: 24 }) ??
-      (T.type.pillTracking === undefined ? undefined : { letterSpacing: T.type.pillTracking }),
-  );
-  const pill = new Container();
-  pill.position.set(chips ? 578 : 580, chips ? 9 : 6);
-  pill.addChild(pillBg, pillText);
+  time.position.set(380, 8);
   const title = label("", 28, C.feedTitle);
-  title.position.set(0, 8); // x set per render, after the pill
-  row.addChild(icon, kindChip, kind, who, time, pill, title);
+  title.position.set(404, 8);
+  row.addChild(icon, who, time, title);
   feedPanel.addChild(row);
-  return { row, icon, kindChip, kind, who, time, pillBg, pillText, pill, title, key: null };
+  return { row, icon, who, time, title, key: null };
 });
 
 // --------------------------------------------------------------------------------
@@ -744,7 +733,7 @@ const feedRows = Array.from({ length: FEED_ROWS }, (_, i) => {
 // --------------------------------------------------------------------------------
 
 const statusHeader = T.decorations.headers?.status;
-const statusPanel = panel(24 + FEED_W + 16, 204, 300, FEED_H, "STATUS", C.ink, statusHeader);
+const statusPanel = panel(24 + FEED_W + 332, 204, 300, FEED_H, "STATUS", C.ink, statusHeader);
 // Neobrutal: Paper's 27px inset, like the heading; elsewhere the heading's 20.
 const STATUS_INSET = statusHeader ? 27 : 20;
 // Light-top to text-bottom of one row; the rows share the body's slack equally.
@@ -815,6 +804,72 @@ function renderStatus(data) {
     if (T.decorations.stats) light.stroke({ width: T.decorations.stats.outline, color: C.ink, alignment: 1 });
     text.style.fill = service ? STATUS_INK[level] : C.dim;
     setStatusText(row, service ? String(service.text) : "CHECKING…");
+  }
+}
+
+// --------------------------------------------------------------------------------
+// Review Queue: each configured reviewer's requested reviews, between the Feed and
+// Status.
+// --------------------------------------------------------------------------------
+
+const reviewHeader = T.decorations.headers?.reviews;
+const reviewPanel = panel(24 + FEED_W + 16, 204, 300, FEED_H, "REVIEW QUEUE", C.ink, reviewHeader);
+const reviewBar = reviewHeader?.bar ?? 56;
+const reviewBody = new Container();
+reviewPanel.addChild(reviewBody);
+
+/**
+ * PR numbers greedily onto at most two lines of `text`; whatever doesn't fit is
+ * counted as `+N`, bumping PRs off the second line until the count fits too.
+ */
+function wrapPrs(text, prs) {
+  const fits = (line) => {
+    text.text = line.join("  ");
+    return text.width <= STATUS_TEXT_W;
+  };
+  const lines = [[], []];
+  let shown = 0;
+  for (const line of lines)
+    while (shown < prs.length && (!line.length || fits([...line, `#${prs[shown]}`])))
+      line.push(`#${prs[shown++]}`);
+  if (shown < prs.length) {
+    while (!fits([...lines[1], `+${prs.length - shown}`])) {
+      lines[1].pop();
+      shown--;
+    }
+    lines[1].push(`+${prs.length - shown}`);
+  }
+  text.text = lines.filter((line) => line.length).map((line) => line.join("  ")).join("\n");
+}
+
+let reviewKey = "";
+/** [{reviewer, prs}] from the snapshot: a block per reviewer with PRs waiting, stacked from the top. */
+function renderReviews(queue) {
+  // Rebuilt only when it changed, like the ticker: every snapshot carries it.
+  const key = JSON.stringify(queue);
+  if (key === reviewKey) return;
+  reviewKey = key;
+  for (const old of reviewBody.removeChildren()) old.destroy({ children: true });
+  const waiting = (queue ?? []).filter(({ prs }) => prs.length);
+  // null: the server hasn't read GitHub yet, so it can't vouch for ALL CLEAR.
+  if (!waiting.length) {
+    const note = label(queue ? "ALL CLEAR" : "CHECKING…", 28, C.dim, face("ui", 28, 0, { lineHeight: 34 }));
+    note.position.set(STATUS_INSET, reviewBar + 24);
+    reviewBody.addChild(note);
+    return;
+  }
+  let y = reviewBar + 24;
+  for (const { reviewer, prs } of waiting) {
+    const block = new Container();
+    const name = label("", 30, C.ink, face("display", 30, -0.01));
+    fitText(name, String(reviewer).toUpperCase(), STATUS_TEXT_W);
+    const list = label("", 28, C.ink, face("ui", 28, 0, { lineHeight: 34 }));
+    list.y = name.height + 8;
+    wrapPrs(list, prs);
+    block.addChild(name, list);
+    block.position.set(STATUS_INSET, y);
+    reviewBody.addChild(block);
+    y += Math.round(block.height) + 32;
   }
 }
 
@@ -1220,39 +1275,15 @@ function renderFeed() {
   }
 }
 
-function retextRow({ icon, kindChip, kind, who, time, pillBg, pillText, pill, title }, entry) {
-  const style = EVENTS[entry.type] ?? { name: entry.type, color: C.dim, icon: "star" };
-  icon.texture = pixelTexture(style.icon);
-  kind.text = style.name;
-  if (chips) {
-    kind.style.fill = stickerInk(style.color);
-    sticker(kindChip, kind, style.color);
-  } else kind.style.fill = style.color;
+function retextRow({ icon, who, time, title }, entry) {
+  icon.texture = pixelTexture(EVENTS[entry.type]?.icon ?? "star");
   // Clipped to the characters that fit each column at this font size rather than
   // wrapped; a Feed row is a glance, not a read.
   who.text = clip(entry.actor ?? "", T.type.nameMax);
   time.text = clock(entry.at);
-  pillText.text = clip(entry.repo.split("/").pop(), 16);
-  // Neobrutal: Paper's 14/2 padding inside a 3px outline.
-  const pad = chips ? [17, 5] : [11, 6];
-  pillText.position.set(...pad);
-  const pillWidth = Math.ceil(pillText.width) + pad[0] * 2;
-  const pillHeight = pillText.height + pad[1] * 2;
-  if (chips)
-    pillBg
-      .clear()
-      .roundRect(0, 0, pillWidth, pillHeight, pillHeight / 2)
-      .fill(chips.pill)
-      .stroke({ color: C.ink, width: 3, alignment: 1 });
-  else
-    pillBg
-      .clear()
-      .roundRect(0, 0, pillWidth, 34, 6)
-      .fill({ color: C.white, alpha: 0.06 })
-      .stroke({ color: C.dim, alpha: 0.7, width: 1.5 });
-  // Title starts just past the pill and runs to the panel edge.
-  title.position.x = pill.position.x + pillWidth + (chips ? 24 : 14);
-  fitText(title, `#${entry.number}  ${entry.title}`, FEED_W - (chips ? 62 : 44) - title.position.x);
+  // The Linear `[TICKET]` prefix is noise at a glance; the title runs to the panel edge.
+  const name = entry.title.replace(/^\[[^\]]*\]\s*/, "");
+  fitText(title, `#${entry.number}  ${name}`, FEED_W - (chips ? 62 : 44) - title.position.x);
 }
 
 // An idle board still has to age entries out; a minute of granularity is plenty.
@@ -2289,6 +2320,7 @@ function handleMessage(data) {
     setDevDeploy(data.devDeploy);
     renderWau(data.wau);
     renderStatus(data.status);
+    renderReviews(data.reviewQueue ?? null);
   } else {
     feed.push(stamp(data));
     if (CELEBRATIONS.has(data.type)) celebrate(data.type, data, Boolean(data.audible));
@@ -2332,6 +2364,7 @@ connect();
 renderFeed();
 renderWau(null);
 renderStatus(null);
+renderReviews(null);
 renderHeadlines([]);
 void loadHeadlines();
 setInterval(() => void loadHeadlines(), NEWS_REFRESH_MS);
@@ -2357,6 +2390,7 @@ stage.playHeld();
 //   arcade.setStatus({fetchedAt, services:[{name:"GITHUB", level:"minor", text:"..."}]})
 //     / arcade.setStatus(null) — Status panel lights, (data, true) for stale
 //   (with the socket down both panels draw stale whatever you pass)
+//   arcade.setReviews([{reviewer:"Maximus", prs:[812, 815]}]) — Review Queue panel
 //   arcade.setHeadlines(["A very important AI headline"]) — bottom news ticker
 //   ?theme=arcade — load in a theme from public/themes (arcade is the pre-reskin
 //     look a Target Hit puts on until midnight); the server's snapshot `theme`
@@ -2410,6 +2444,7 @@ window.arcade = {
   setDevDeploy,
   setWau: (data = sampleWau, stale = false) => renderWau(data && { ...data, stale }),
   setStatus: (data, stale = false) => renderStatus(data && { ...data, stale }),
+  setReviews: renderReviews,
   setHeadlines: renderHeadlines,
   event: handleMessage,
   demo() {
