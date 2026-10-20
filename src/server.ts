@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import express, { type ErrorRequestHandler, type RequestHandler } from "express";
 import { WebSocketServer } from "ws";
+import { cycleDay, dayKey, localDate, nextMidnight, startOfDay, startOfWeek } from "./clock.ts";
 
 type DomainEvent = {
   type: string;
@@ -157,10 +158,6 @@ const SLOTS = [
 /** A Sound Library file name. The pattern is also what keeps a name inside its directory. */
 const SOUND_NAME = /^[a-z0-9-]+\.mp3$/;
 
-/** "YYYY-MM-DD" of `at` in local time — what a one-off schedule's date is compared with. */
-const localDate = (at: Date) =>
-  `${at.getFullYear()}-${`${at.getMonth() + 1}`.padStart(2, "0")}-${`${at.getDate()}`.padStart(2, "0")}`;
-
 type Schedule = {
   id: string;
   kind: "reminder" | "celebration";
@@ -206,20 +203,6 @@ async function normalizeSound(src: string, dest: string) {
   });
   return stdout + stderr;
 }
-
-/** Monday 00:00 local time of the week containing `at` — the dedup window. */
-function startOfWeek(at: number) {
-  const monday = new Date(at);
-  monday.setHours(0, 0, 0, 0);
-  monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
-  return monday.getTime();
-}
-
-/** Local midnight of the day containing `at` — today's MVP starts here. */
-const startOfDay = (at: number) => new Date(at).setHours(0, 0, 0, 0);
-
-/** The next local midnight after `at` — when a live Theme comes off. */
-const nextMidnight = (at: number) => new Date(at).setHours(24, 0, 0, 0);
 
 /**
  * A Theme — the board's whole look — is a file in public/themes/. The pattern keeps
@@ -548,16 +531,6 @@ export async function startServer(port: number, options: Options = {}) {
     return feed.map(({ at, event }) => ({ ...event, at }));
   };
 
-  // The currently open PRs: board state rather than a 24h event, so an open PR sits
-  // on the board however long ago it was opened. Backfill fills it; a pr-opened adds,
-  // a pr-merged or pr-closed removes.
-  const openPrs: {
-    repo: string;
-    number: number;
-    title: string;
-    actor: string;
-  }[] = [];
-
   // The event types Backfill can rediscover after a restart, so a repeat delivery of
   // one is the same event rather than a new one. Kept for a whole week (not the Feed's
   // 24h) because Backfill fetches back to the week start, so a webhook redelivered days
@@ -593,12 +566,12 @@ export async function startServer(port: number, options: Options = {}) {
   };
 
   /**
-   * The one path into state: append to the Feed (which the MVP is read from) and
-   * update the in-flight list. Webhooks and Backfill both land here (Backfill with the
-   * event's real `at`), so today's MVP rebuilds from Backfill for free. Repeats of a
-   * Backfillable event (same type/repo/number, this week) are dropped — that's what
-   * stops a webhook duplicating what Backfill already fetched. Returns true when the
-   * event was recorded, or null for a dropped repeat.
+   * The one path into state: append to the Feed (which the MVP is read from).
+   * Webhooks and Backfill both land here (Backfill with the event's real `at`), so
+   * today's MVP rebuilds from Backfill for free. Repeats of a Backfillable event (same
+   * type/repo/number, this week) are dropped — that's what stops a webhook duplicating
+   * what Backfill already fetched. Returns true when the event was recorded, or null
+   * for a dropped repeat.
    */
   const recordEvent = (event: DomainEvent, at: number = now()): true | null => {
     // An event with no parseable timestamp (a Backfilled PR missing created_at, say)
@@ -625,16 +598,6 @@ export async function startServer(port: number, options: Options = {}) {
       seen.add(key);
     }
     feed.push({ at, event });
-    const { type, repo, number, title, actor } = event;
-    const open = openPrs.findIndex(
-      (pr) => pr.repo === repo && pr.number === number,
-    );
-    // Newest first: the display shows the head of this list, and a freshly
-    // opened PR should be visible there, not buried behind "+N MORE".
-    if (type === "pr-opened" && open < 0)
-      openPrs.unshift({ repo, number, title, actor });
-    if ((type === "pr-merged" || type === "pr-closed") && open >= 0)
-      openPrs.splice(open, 1);
     return true;
   };
 
@@ -798,10 +761,9 @@ export async function startServer(port: number, options: Options = {}) {
     // Saturday midnight on the Pi's clock (US Central).
     const clock = () => {
       const t = now();
-      const at = new Date(t);
-      const today = (at.getDay() + 1) % 7;
+      const today = cycleDay(t);
       const fraction = (t - startOfDay(t)) / (nextMidnight(t) - startOfDay(t));
-      return { today, dayKey: at.toDateString(), elapsed: today + fraction };
+      return { today, dayKey: dayKey(t), elapsed: today + fraction };
     };
     const token = process.env.POSTHOG_PERSONAL_API_KEY;
     if (!token) {
@@ -924,7 +886,7 @@ export async function startServer(port: number, options: Options = {}) {
   /** Replays the Target Hit on demand, with today's row from the last WUU read. */
   const replayTargetHit = () => {
     wearUntilMidnight("arcade");
-    const row = lastWau?.daily[(new Date(now()).getDay() + 1) % 7];
+    const row = lastWau?.daily[cycleDay(now())];
     broadcast({
       type: "wau-target-hit",
       audible: soundAllowed(),
@@ -979,14 +941,11 @@ export async function startServer(port: number, options: Options = {}) {
 
   // Display protocol (server -> client only):
   //   on connect: {"type":"snapshot","feed":[{<domain event>, "at":<ms>}, ...],
-  //                "openPrs":[{repo, number, title, actor}, ...],
   //                "mvp":{"names":[<string>, ...],"count":<number>}|null,
   //                "devDeploy":{"actor":<string>,"at":<ms>,"repo":<string>,"run":<number>}|null,
   //                "theme":<string>, "sounds":{"<slot>":"sounds/<path>.mp3", ...}}
   //               feed is oldest first and holds the last 24h, each entry stamped with
-  //               the server time it happened; openPrs is the current set of open PRs
-  //               (state, so no 24h expiry) — what's in flight now, each with the
-  //               GitHub login of its author; mvp names all Actors tied for today's
+  //               the server time it happened; mvp names all Actors tied for today's
   //               lead, null until today has an event; devDeploy is the last teammate
   //               to deploy to dev, null until one has; theme names the Theme the board
   //               wears (a file in public/themes/) — config.theme, else a live override:
@@ -1030,7 +989,6 @@ export async function startServer(port: number, options: Options = {}) {
   const snapshot = () => ({
     type: "snapshot",
     feed: currentFeed(),
-    openPrs,
     mvp: todaysMvp(),
     devDeploy,
     theme: theme(),
@@ -1323,9 +1281,9 @@ export async function startServer(port: number, options: Options = {}) {
             ? { ...event, audible, teammate }
             : event,
         );
-        // Any event can change today's MVP (and an open/merged/closed also moves the
-        // in-flight list), so follow every recorded one with a fresh snapshot rather
-        // than inventing a second message shape for state the snapshot already carries.
+        // Any event can change today's MVP, so follow every recorded one with a fresh
+        // snapshot rather than inventing a second message shape for state the snapshot
+        // already carries.
         broadcast(snapshot());
       }
     }
@@ -1579,7 +1537,7 @@ export async function startServer(port: number, options: Options = {}) {
     if (minute <= lastMinute) return;
     lastMinute = minute;
     const chime = isWeekday(at) && chimes.includes(hhmm);
-    const today = localDate(at);
+    const today = localDate(at.getTime());
     const due = schedules.filter(
       (schedule) =>
         schedule.time === hhmm &&

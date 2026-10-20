@@ -13,11 +13,6 @@ import {
 const merged = fixture("pull-request-merged.json"); // hubot merged projects-app#42
 const review = fixture("pull-request-review.json"); // reviewer-rita on features#7
 const comment = fixture("issue-comment.json"); // commenter-carl on content#13
-const opened = JSON.stringify({
-  ...JSON.parse(merged),
-  action: "opened",
-  pull_request: { ...JSON.parse(merged).pull_request, merged: false },
-});
 const changesRequested = JSON.stringify({
   ...JSON.parse(review),
   review: { state: "changes_requested", user: { login: "reviewer-rita" } },
@@ -148,21 +143,6 @@ test("the MVP is named by the config names map, not the raw login", async () => 
   await postWebhook(running.port, { body: merged }); // merged_by hubot -> "Botty"
 
   expect((await readSnapshot(running.port)).mvp).toEqual({ names: ["Botty"], count: 1 });
-});
-
-test("a freshly opened PR appears at the head of the In Flight list, not buried at the tail", async () => {
-  running = await start();
-
-  await postWebhook(running.port, { body: opened }); // #42
-  const newest = JSON.stringify({
-    ...JSON.parse(merged),
-    action: "opened",
-    pull_request: { ...JSON.parse(merged).pull_request, number: 77, title: "Newest work", merged: false },
-  });
-  await postWebhook(running.port, { body: newest });
-
-  const snapshot = await readSnapshot(running.port);
-  expect(snapshot.openPrs.map((pr: any) => pr.number)).toEqual([77, 42]);
 });
 
 test("the board shows a team member's first name from the config names map, and the raw login when unmapped", async () => {

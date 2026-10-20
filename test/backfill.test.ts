@@ -288,16 +288,6 @@ test("Backfilled events older than 24 hours are kept out of the Feed snapshot", 
       at: NOW - HOUR,
     },
   ]);
-  // The open PR is state, not a 24h event: it stays on the board however old it is,
-  // carrying its author.
-  expect(snapshot.openPrs).toEqual([
-    {
-      repo: "example-org/projects-app",
-      number: 1,
-      title: "Stale open one",
-      actor: "stale-sam",
-    },
-  ]);
 });
 
 test("Backfilled approvals reach the Feed, but reviews alone make no MVP", async () => {

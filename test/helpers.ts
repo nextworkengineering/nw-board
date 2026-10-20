@@ -7,8 +7,9 @@ import { WebSocket } from "ws";
 
 /**
  * Shared plumbing for driving the server from outside: sign and POST webhooks,
- * connect a display, read a snapshot. Nothing here imports from src/ — the test
- * files own the one seam (`startServer`).
+ * connect a display, read a snapshot. Nothing here imports from src/. A deepened
+ * module (src/clock.ts, say) is tested by importing it directly in its own
+ * test/<module>.test.ts; the `startServer` tests stay the regression net.
  */
 
 export const SECRET = "test-webhook-secret";
