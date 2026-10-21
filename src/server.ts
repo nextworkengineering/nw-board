@@ -457,7 +457,7 @@ export async function startServer(port: number, options: Options = {}) {
   //               the last Service Status and WUU readings, each null until its first
   //               read lands (wau stays null without a PostHog credential), as below;
   //               reviewQueue has one entry per configured reviewer, in config order and
-  //               even when it is empty, naming the open PRs (numbers ascending, across
+  //               even when it is empty, naming the open non-draft PRs (numbers ascending, across
   //               every Tracked Repo) that ask that reviewer for a review — reviewer is
   //               the display name, else the login; null until the first open-PR read
   //               lands. Each change is pushed as a fresh snapshot.
@@ -515,7 +515,8 @@ export async function startServer(port: number, options: Options = {}) {
   const noteReviewRequests = (repo: string, open: any[]) =>
     reviewRequests.set(
       repo,
-      open.flatMap((pr) =>
+      // A draft is not ready for review, whoever GitHub has down as asked.
+      open.filter((pr) => !pr.draft).flatMap((pr) =>
         (pr.requested_reviewers ?? []).map((who: any) => ({ login: login(who), number: pr.number })),
       ),
     );

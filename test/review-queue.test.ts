@@ -140,3 +140,24 @@ test("renaming a reviewer in the Admin Console reaches the board at once", async
 
   expect(messages.at(-1).reviewQueue).toEqual([{ reviewer: "Loheth", prs: [4] }]);
 });
+
+test("a draft PR is not waiting on review, so it stays off the queue", async () => {
+  const base = await openPrsApi({
+    "example-org/projects-app": [{ ...openPr(4, "brandon-nextwork"), draft: true }, openPr(8, "brandon-nextwork")],
+  });
+  running = await startServer(0, { configPath: config(["brandon-nextwork"]), githubApiBase: base });
+
+  expect((await readSnapshot(running.port)).reviewQueue).toEqual([{ reviewer: "Brandon", prs: [8] }]);
+});
+
+test("a repo with more open PRs than one page holds is read to the end", async () => {
+  // GitHub pages open PRs 100 at a time, newest first: the oldest request sits on page 2.
+  const page1 = Array.from({ length: 100 }, (_, i) => openPr(1000 - i));
+  const base = await stubGitHubApi((url) => {
+    if (!url.includes("state=open") || !url.includes("/example-org/projects-app/")) return [];
+    return url.includes("page=2") ? [openPr(7, "brandon-nextwork")] : page1;
+  });
+  running = await startServer(0, { configPath: config(["brandon-nextwork"]), githubApiBase: base });
+
+  expect((await readSnapshot(running.port)).reviewQueue).toEqual([{ reviewer: "Brandon", prs: [7] }]);
+});
