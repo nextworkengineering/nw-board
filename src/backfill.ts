@@ -32,6 +32,18 @@ export const login = (who: any) => who?.login ?? "";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
 
+/** Every open PR in `repo`: GitHub pages them 100 at a time, and a backlog outgrows one page. */
+async function openPulls(get: GitHubGet, repo: string) {
+  const open: any[] = [];
+  for (let page = 1; ; page++) {
+    const batch: any[] = await get(
+      `${repo}/pulls?state=open&per_page=100${page > 1 ? `&page=${page}` : ""}`,
+    );
+    open.push(...batch);
+    if (batch.length < 100) return open;
+  }
+}
+
 /**
  * Every pr-opened, pr-merged, pr-closed and review-approved in `repos` that happened in
  * [since, until], oldest first (the Feed's order: its 24h expiry shifts off the front).
@@ -57,7 +69,7 @@ async function happened(
 
   for (const repo of repos) {
     try {
-      const open: any[] = await get(`${repo}/pulls?state=open&per_page=100`);
+      const open = await openPulls(get, repo);
       onOpen(repo, open);
       const prs = [...open];
       let closed: any[] = [];
