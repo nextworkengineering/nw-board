@@ -205,10 +205,15 @@ test("snapshot carries the status, stale for a display connecting mid-outage", a
   const fresh = { fetchedAt: new Date(NOW).toISOString(), services: ALL_OK, stale: false };
   expect((await readSnapshot(running.port)).status).toEqual(fresh);
 
-  // Rate-limited for an hour, and the last good read is over two intervals old: the
-  // board keeps that reading, marked stale, for the next display to connect.
+  // Rate-limited for an hour. Nine minutes on, the last good reading still stands:
+  // a few failed reads are not an outage of the board's own.
   limited = true;
-  now += 1_000;
+  now += 9 * 60_000;
+  await sleep(100);
+  expect((await readSnapshot(running.port)).status).toEqual(fresh);
+
+  // Past ten minutes the board keeps that reading, marked stale, for the next display.
+  now += 2 * 60_000;
   await vi.waitFor(async () =>
     expect((await readSnapshot(running!.port)).status).toEqual({ ...fresh, stale: true }),
     PATIENCE,
