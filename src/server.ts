@@ -492,7 +492,7 @@ export async function startServer(port: number, options: Options = {}) {
   //               "level":"ok"|"minor"|"major"|"unknown","text":<string>}, ...],
   //               "stale":true|false} — the status pages read once a minute, pushed only
   //               when a row or "stale" changes. fetchedAt is the last good read; stale
-  //               turns true once that is over two minutes old (reads failing, or held by a 429).
+  //               turns true once that is over ten minutes old (reads failing, or held by a 429).
   //               GET /status.json serves the same body.
   //   wau:        {"type":"wau","wau":<WUU>} where <WUU> = {"fetchedAt":<ISO>,
   //               "currentWau":<n>,"targetWau":<n>,"targetPercent":<n>,
@@ -500,7 +500,7 @@ export async function startServer(port: number, options: Options = {}) {
   //               "current":<n>,"previous":<n>}, ...7, Saturday first],"today":0..6,
   //               "onTarget":"on"|"behind"|"far-behind","stale":true|false} — PostHog read
   //               once a minute on US Central days, pushed only when a number, today,
-  //               onTarget or "stale" changes; fetchedAt and stale as for status.
+  //               onTarget or "stale" changes; fetchedAt as for status, stale after thirty minutes.
   //               current/previous are each day's new WUU this week / last week; today
   //               indexes daily. GET /wau.json serves the same body (503 without a
   //               PostHog credential, 502 before the first reading).
@@ -555,6 +555,8 @@ export async function startServer(port: number, options: Options = {}) {
     name: "Service Status",
     read: statusReader({ urls: options.statusUrls, timeoutMs: options.statusTimeoutMs }),
     intervalMs: options.statusIntervalMs ?? 60_000,
+    // A status page that misses a few reads is not news; ten minutes without one is.
+    staleAfterMs: 10 * 60_000,
     now,
     onChange: (reading) => broadcast({ type: "status", status: statusBody(reading) }),
   });
@@ -586,6 +588,9 @@ export async function startServer(port: number, options: Options = {}) {
           },
         }),
         intervalMs: options.wauIntervalMs ?? 60_000,
+        // PostHog sometimes queues a query past the timeout, so a few reads in a row can
+        // fail on a healthy day. STALE means half an hour without a good one, as before #48.
+        staleAfterMs: 30 * 60_000,
         now,
         onChange: (reading) => broadcast({ type: "wau", wau: wauPayload(reading) }),
       })

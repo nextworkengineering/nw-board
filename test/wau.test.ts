@@ -287,6 +287,24 @@ test("a 429 keeps the last good reading", async () => {
   expect(await wauJson()).toEqual(good);
 });
 
+test("slow or failing PostHog reads only mark WUU stale after 30 minutes", async () => {
+  // PostHog sometimes queues a query past the timeout; a few failed reads in a row
+  // must not flash STALE on the panel (the pre-#48 board allowed 30 minutes).
+  let clock = thursdayAt(10);
+  const ph = await posthog();
+  await boot(ph, () => clock);
+  const good = await wauJson();
+  ph.status = 500;
+  clock += 29 * 60_000;
+  const failed = ph.refused;
+  await until(() => ph.refused > failed + 2, "failed reads at 29 minutes");
+  expect(await wauJson()).toEqual(good);
+
+  clock += 2 * 60_000;
+  await until(async () => (await wauJson()).stale === true, "stale after 30 minutes");
+  expect(await wauJson()).toEqual({ ...good, stale: true });
+});
+
 test("wau is pushed over the websocket", async () => {
   const ph = await posthog();
   await boot(ph);

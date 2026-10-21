@@ -144,7 +144,8 @@ export const wauPayload = (reading: Reading<Wau> | undefined) =>
 export function wauReader({
   token,
   base = "https://us.posthog.com",
-  timeoutMs = 15_000,
+  // PostHog lets a queued query wait up to 30 s before it runs.
+  timeoutMs = 30_000,
   now,
   onTargetHit,
 }: {
