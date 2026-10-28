@@ -77,7 +77,8 @@ test("the queries count US Central days, with the pageview filter beside the bot
   for (const sql of [LIVE_QUERY, LAST_WEEK_QUERY]) {
     expect(sql).toContain("toStartOfDay(toTimeZone(now(), 'America/Chicago')) AS today_ct");
     expect(sql).toContain("(toDayOfWeek(toTimeZone(min(timestamp), 'America/Chicago')) + 1) % 7 AS day");
-    expect(sql).toMatch(/WHERE event = '\$pageview'\n(.*\n){2}\s+AND NOT coalesce\(properties\.\$virt_is_bot, false\)/);
+    expect(sql).toMatch(/WHERE event = '\$pageview'\n(.*\n){2}\s+AND NOT \(coalesce\(properties\.\$virt_is_bot, false\)/);
+    expect(sql).toContain("AND properties.$timezone = 'Asia/Shanghai'))\n  GROUP BY person_id");
   }
   expect(LIVE_QUERY).toContain("AND timestamp >= week_start\n    AND timestamp <= now()");
   expect(LAST_WEEK_QUERY).toContain("week_start - toIntervalDay(7) AS last_week_start\nSELECT");

@@ -24,6 +24,9 @@ export const DAYS = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Th
  * One row of 8 counts: new persons per Central day of a Sat–Fri week (each person
  * counted on the day of their first pageview), then the week's distinct persons. One
  * row rather than a GROUP BY day, so a day with nobody new is a 0 and not a gap.
+ * The bot check is the dashboard's: PostHog's `$virt_is_bot` plus one headless
+ * fingerprint marketing excludes by hand (added to every tile 2026-10-28); keep the
+ * two in step when they edit it.
  * `event` sits in the same WHERE as the bot check, so ClickHouse prunes on its sort
  * key and reads the week's pageviews, not every event of the week. A ninth column
  * names the current week by its start, in both queries, so a live and a last-week row
@@ -48,7 +51,10 @@ FROM (
   WHERE event = '$pageview'
     AND timestamp >= ${since}
     AND timestamp ${until}
-    AND NOT coalesce(properties.$virt_is_bot, false)
+    AND NOT (coalesce(properties.$virt_is_bot, false)
+      OR (properties.$os = 'Linux' AND properties.$browser = 'Chrome'
+        AND properties.$screen_width = 1365 AND properties.$screen_height = 768
+        AND properties.$timezone = 'Asia/Shanghai'))
   GROUP BY person_id
 )`;
 /** This week so far: read every minute. */
