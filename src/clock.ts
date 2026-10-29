@@ -20,8 +20,24 @@ export const localDate = (at: number) => {
   return `${day.getFullYear()}-${`${day.getMonth() + 1}`.padStart(2, "0")}-${`${day.getDate()}`.padStart(2, "0")}`;
 };
 
-/** The day's index in the WUU week, Saturday=0 … Friday=6 — the dashboard's `daily` order. */
-export const cycleDay = (at: number) => (new Date(at).getDay() + 1) % 7;
+/**
+ * The WUU panel's days are UTC days, not local ones: PostHog's project counts in UTC, so
+ * the board's Thursday is PostHog's Thursday (from 7pm Central the evening before in
+ * summer, 6pm in winter). UTC has no DST, so every one of these days is 24 hours.
+ */
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** UTC midnight of the day containing `at`: where the WUU panel's day starts. */
+export const utcStartOfDay = (at: number) => at - (((at % DAY_MS) + DAY_MS) % DAY_MS);
+
+/** The next UTC midnight after `at`: where the WUU panel's day ends. */
+export const utcNextMidnight = (at: number) => utcStartOfDay(at) + DAY_MS;
+
+/** A key naming the UTC day containing `at`, e.g. "2026-10-20". */
+export const utcDayKey = (at: number) => new Date(utcStartOfDay(at)).toISOString().slice(0, 10);
+
+/** The UTC day's index in the WUU week, Saturday=0 … Friday=6, the dashboard's `daily` order. */
+export const cycleDay = (at: number) => (new Date(at).getUTCDay() + 1) % 7;
 
 /** Monday 00:00 local time of the week containing `at` — the dedup window. */
 export const startOfWeek = (at: number) => {
