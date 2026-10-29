@@ -874,11 +874,11 @@ function renderReviews(queue) {
 }
 
 // --------------------------------------------------------------------------------
-// Weekly Unique User Growth: four dashboard KPIs and new WUU per day for this week vs last week.
+// Weekly Active User Growth: four dashboard KPIs and new WAU per day for this week vs last week.
 // --------------------------------------------------------------------------------
 
 const wauHeader = T.decorations.headers?.wau;
-const wauPanel = panel(24, SHADOW ? 688 : 712, PANEL_W, 272, "WEEKLY UNIQUE USER GROWTH", C.ink, wauHeader);
+const wauPanel = panel(24, SHADOW ? 688 : 712, PANEL_W, 272, "WEEKLY ACTIVE USER GROWTH", C.ink, wauHeader);
 const wauStatus = label("LOADING...", wauHeader ? 22 : 24, C.dim);
 wauStatus.anchor.set(1, 0);
 wauStatus.position.set(1852, 16);
@@ -921,7 +921,7 @@ function wauCard(x, y, title, hot) {
 // Neobrutal's boxes sit inside Paper's 16/22 body padding, a 14px gutter apart.
 const [cardX, cardY] = T.decorations.stats ? [[27, 471], [77, 153]] : [[20, 464], [68, 150]];
 const wauValues = {
-  currentWau: wauCard(cardX[0], cardY[0], "CURRENT WUU"),
+  currentWau: wauCard(cardX[0], cardY[0], "CURRENT WAU"),
   targetWau: wauCard(cardX[1], cardY[0], "WEEKLY TARGET"),
   targetPercent: wauCard(cardX[0], cardY[1], "TARGET REACHED", true),
   activationPercent: wauCard(cardX[1], cardY[1], "ACTIVATION RATE"),
@@ -959,7 +959,7 @@ wauChart.position.set(chart ? 1187 : 1158, chart ? 77 : 68);
 const plot = chart ? { x: 0, y: 30, width: 650, height: 82 } : { x: 8, y: 38, width: 672, height: 96 };
 wauPanel.addChild(wauChart);
 const chartType = face("ui", 18, 0.04, { lineHeight: 22 });
-const chartTitle = label("NEW WUU / DAY", chart ? 18 : 20, C.dim, chartType);
+const chartTitle = label("NEW WAU / DAY", chart ? 18 : 20, C.dim, chartType);
 wauChart.addChild(chartTitle);
 const currentLegend = label(chart ? "THIS WEEK" : "● THIS WEEK", 18, chart ? C.ink : C.amber, chartType && { lineHeight: 22 });
 currentLegend.position.set(500, 2);
@@ -1019,12 +1019,12 @@ const compact = (n) =>
   new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 })
     .format(n)
     .toLowerCase();
-const wauUnavailable = label("WUU DATA UNAVAILABLE — RETRYING", 24, C.dim);
+const wauUnavailable = label("WAU DATA UNAVAILABLE — RETRYING", 24, C.dim);
 wauUnavailable.anchor.set(0.5);
 wauUnavailable.position.set(wauChart.x + plot.x + plot.width / 2, 154);
 wauPanel.addChild(wauUnavailable);
 
-/** A pushed WUU payload the panel can draw, else null: drawn as unavailable. */
+/** A pushed WAU payload the panel can draw, else null: drawn as unavailable. */
 function validWau(data) {
   if (data == null) return null;
   if (
@@ -1035,7 +1035,7 @@ function validWau(data) {
     data.daily.length !== 7 ||
     !data.daily.every((point) => Number.isFinite(point?.current) && Number.isFinite(point?.previous))
   ) {
-    console.warn("invalid WUU data", data);
+    console.warn("invalid WAU data", data);
     return null;
   }
   return data;
@@ -1813,7 +1813,7 @@ function mergedTakeover(event, done) {
 }
 
 /**
- * wau-target-hit: today's new WUU beating the same weekday last week. Rarer than
+ * wau-target-hit: today's new WAU beating the same weekday last week. Rarer than
  * a merge and nobody's PR, so it holds the board longer: the confetti keeps
  * raining and the fireworks re-fire until the dim lifts.
  */
@@ -1827,10 +1827,10 @@ function wauTakeover(event, done) {
     "",
   );
   const day = typeof event.label === "string" && event.label ? event.label.toUpperCase() : "";
-  caption.text = `WE BEAT LAST ${day || "WEEK"}'S NEW WUU`;
+  caption.text = `WE BEAT LAST ${day || "WEEK"}'S NEW WAU`;
   const whole = new Intl.NumberFormat().format;
   if ([event.current, event.previous].every(Number.isFinite))
-    credit.text = `${whole(event.current)} NEW WUU TODAY  /  ${whole(event.previous)} LAST ${day.slice(0, 3) || "WEEK"}`;
+    credit.text = `${whole(event.current)} NEW WAU TODAY  /  ${whole(event.previous)} LAST ${day.slice(0, 3) || "WEEK"}`;
   fit();
   const bannerY = banner.y;
 
@@ -2291,7 +2291,7 @@ app.ticker.add((ticker) => {
 //    mvp:{names,count}|null,                    (all Actors tied for today's lead)
 //    devDeploy:{actor,at}|null,                 (last teammate to deploy to dev)
 //    theme:"<name>",                            (theme to wear; absent/unknown = no opinion)
-//    wau:<WUU>|null, status:<Service Status>|null}  (null before the server's first read)
+//    wau:<WAU>|null, status:<Service Status>|null}  (null before the server's first read)
 //   on connect and after every recorded event, then bare domain
 //   events {type, repo, number, title, actor}; actor is the GitHub login of whoever
 //   did it (merger, reviewer, commenter), always a string and "" when GitHub named
@@ -2301,14 +2301,14 @@ app.ticker.add((ticker) => {
 //   {type:"day-chime", at:"HH:MM", last} marks the start and end of the workday;
 //   last:true is the day's final chime (old servers send none: 17:00 is the end).
 //   {type:"wau-target-hit", audible, label, current, previous} is a Celebration
-//   with no PR (today's new WUU beating the same weekday last week; label is the
+//   with no PR (today's new WAU beating the same weekday last week; label is the
 //   weekday): it takes the board over but never joins the Feed.
 //   {type:"reminder", text, sound, audible} is a scheduled banner and
 //   {type:"scheduled-celebration", text, sound, audible} a scheduled takeover, both
 //   from the Admin Console; sound is "sounds/….mp3" or null (jingle). No Feed row.
 //   The snapshot's sounds:{slot:"sounds/….mp3"} names the Admin Console's assigned
 //   slots; absent (old servers) keeps the clips the page has.
-//   {type:"wau", wau:<WUU>} and {type:"status", status:<Service Status>} push a
+//   {type:"wau", wau:<WAU>} and {type:"status", status:<Service Status>} push a
 //   panel's payload (the /wau.json and /status.json bodies, each with the server's
 //   stale:true|false) only when it changes, so silence is not staleness: the panels
 //   grey only while the socket is down, until the next snapshot redraws them.
@@ -2369,7 +2369,7 @@ function handleMessage(data) {
 }
 
 let backoff = 500;
-// WUU and Status are only as fresh as this socket: while it is down they draw stale.
+// WAU and Status are only as fresh as this socket: while it is down they draw stale.
 let socketOpen = false;
 function connect() {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -2419,7 +2419,7 @@ stage.playHeld();
 //   arcade.setMvp({names:["Maximus"],count:12}) / arcade.setMvp(null) — marquee MVP
 //   arcade.setDevDeploy({actor:"Maximus"}) / arcade.setDevDeploy(null) — feed header
 //   arcade.setWau() / arcade.setWau(undefined, true) / arcade.setWau(null)
-//     — sample success / stale / unavailable WUU states, drawn as a push would be
+//     — sample success / stale / unavailable WAU states, drawn as a push would be
 //   arcade.setStatus({fetchedAt, services:[{name:"GITHUB", level:"minor", text:"..."}]})
 //     / arcade.setStatus(null) — Status panel lights, (data, true) for stale
 //   (with the socket down both panels draw stale whatever you pass)
