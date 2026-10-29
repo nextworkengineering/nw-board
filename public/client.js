@@ -971,6 +971,10 @@ if (chart) {
   // Paper's order, flush with the chart's right edge: swatch, 8px, label, 22px gap.
   currentLegend.position.set(plot.width + 2 - currentLegend.width, 0);
   previousLegend.position.set(currentLegend.x - 46 - previousLegend.width, 0);
+} else {
+  // Flush right too, so the daily target's entry fits between them and the title.
+  currentLegend.x = plot.x + plot.width - currentLegend.width;
+  previousLegend.x = currentLegend.x - 24 - previousLegend.width;
 }
 // Neobrutal's legend keys are outlined swatches: its canary text would vanish on white.
 if (chart)
@@ -1004,6 +1008,13 @@ const barValues = [0, 1].map(() =>
     return value;
   }),
 );
+// The daily target's legend entry, left of LAST WEEK: a dashed key, then its number.
+const targetLegend = label("", 18, C.green, chartType && { lineHeight: 22 });
+targetLegend.anchor.set(1, 0);
+targetLegend.position.set(previousLegend.x - (chart ? 46 : 24), previousLegend.y);
+wauChart.addChild(targetLegend);
+const targetKey = new Graphics();
+wauChart.addChild(targetKey);
 const compact = (n) =>
   new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 })
     .format(n)
@@ -1063,8 +1074,12 @@ function renderWau(data) {
     onTargetLight.circle(112, 80, 32).fill(light).stroke({ width: T.decorations.stats.outline, color: C.ink, alignment: 1 });
   else if (light) onTargetLight.circle(112, 94, 36).fill(light);
 
+  // What a day has to add for the week to reach its target at a flat pace. The scale
+  // includes it, so the line stays on the chart on a slow week.
+  const dailyTarget = snapshot.targetWau > 0 ? snapshot.targetWau / 7 : 0;
   const max = Math.max(
     1,
+    dailyTarget,
     ...snapshot.daily.flatMap((point) => [point.current, point.previous]),
   );
   const groupWidth = plot.width / 7;
@@ -1092,6 +1107,24 @@ function renderWau(data) {
       value.style.fill = chart?.valueInk ?? color;
       value.position.set(x(index) + offset + barWidth / 2, plot.y + plot.height + 4);
     });
+  }
+  // The daily target as a dotted line over the bars (8px dashes, 6px gaps), keyed in
+  // the legend with its number. No target, no line and no legend entry.
+  targetLegend.visible = dailyTarget > 0;
+  targetKey.clear();
+  if (dailyTarget > 0) {
+    const targetY = y(dailyTarget);
+    for (let at = plot.x; at < plot.x + plot.width; at += 14)
+      chartLines.moveTo(at, targetY).lineTo(Math.min(at + 8, plot.x + plot.width), targetY);
+    chartLines.stroke({ width: 3, color: C.green });
+    const perDay = compact(Math.round(dailyTarget)).toUpperCase();
+    targetLegend.text = `DAILY TARGET ${perDay}`;
+    // Too wide for a theme's type to clear the title (key included): just the number.
+    if (targetLegend.x - targetLegend.width - 38 < chartTitle.width + 12) targetLegend.text = `TARGET ${perDay}`;
+    const keyRight = targetLegend.x - targetLegend.width - 8;
+    for (let at = keyRight - 22; at < keyRight; at += 9)
+      targetKey.moveTo(at, targetLegend.y + 11).lineTo(Math.min(at + 5, keyRight), targetLegend.y + 11);
+    targetKey.stroke({ width: 3, color: C.green });
   }
   // Under each day so far, a green tick if it beat the same day last week (today's
   // is the Target Hit), else a grey cross. Old cached payloads carry no today: no marks.
