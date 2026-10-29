@@ -5,8 +5,9 @@ import { afterEach, beforeEach, expect, test } from "vitest";
 import { startServer } from "../src/server.ts";
 import { configPath, connectedDisplay } from "./helpers.ts";
 
-// The board's days are US Central days, on the Pi's clock as in the queries. Pin the
-// zone so a "19:30 Central" below is that instant on any machine.
+// The WUU panel's days are UTC days, like PostHog's project; Quiet Hours and the Arcade
+// Theme's midnight stay on the Pi's local (US Central) clock. Pin the zone so a "19:30
+// Central" below is that instant on any machine.
 process.env.TZ = "America/Chicago";
 
 let running: { port: number; close: () => Promise<void> } | undefined;
@@ -37,8 +38,8 @@ const counts = (days: number[]) => [...days, days.reduce((a, b) => a + b, 0)];
 const thursdayWeek = (thursday: number, days: Record<number, number> = {}) =>
   counts([1000, 1001, 1002, 1003, 1004, thursday, 0].map((n, day) => days[day] ?? n));
 const LAST_WEEK = [900, 901, 902, 903, 904, 1000, 1000];
-/** The week both queries name in their 9th column: its Central Saturday midnight. */
-const WEEK_OF_13_AUGUST = "2026-08-08T00:00:00-05:00";
+/** The week both queries name in their 9th column: its Saturday 00:00 UTC. */
+const WEEK_OF_13_AUGUST = "2026-08-08T00:00:00Z";
 
 /** Quiet Hours are local time: 13 August 2026 is a Thursday. */
 const thursdayAt = (hour: number) => new Date(2026, 7, 13, hour).getTime();
@@ -121,7 +122,7 @@ async function step(ph: PostHog, messages: any[], live: number[], today = 5) {
 }
 const hits = (messages: any[]) => messages.filter((m) => m.type === "wau-target-hit");
 
-test("the WUU route serves the cached reading, from narrow Central-day HogQL", async () => {
+test("the WUU route serves the cached reading, from narrow UTC-day HogQL", async () => {
   const ph = await posthog();
   await boot(ph, () => thursdayAt(10), 60_000);
   // The boot read: both queries, both tiles from cache, and the hourly recompute.
@@ -145,7 +146,7 @@ test("the WUU route serves the cached reading, from narrow Central-day HogQL", a
       previous: LAST_WEEK[day],
     })),
     today: 5,
-    // Thursday 10:00 is 5 + 10/24 days in: 5910 against 24400 × 5.4167 / 7 ≈ 18881.
+    // Thursday 10:00 Central is 15:00 UTC, 5 + 15/24 days in: 5910 against 24400 × 5.625 / 7 ≈ 19607.
     onTarget: "far-behind",
     stale: false,
   });
@@ -159,7 +160,7 @@ test("the WUU route serves the cached reading, from narrow Central-day HogQL", a
   for (const { url, body } of posts) {
     expect(url.pathname).toBe("/api/projects/196853/query/");
     expect(body).toMatchObject({ query: { kind: "HogQLQuery" }, refresh: "force_blocking" });
-    expect(body.query.query).toContain("toStartOfDay(toTimeZone(now(), 'America/Chicago'))");
+    expect(body.query.query).toContain("toStartOfDay(toTimeZone(now(), 'UTC'))");
     expect(body.query.query).toContain("WHERE event = '$pageview'");
   }
   const tiles = ph.asked
@@ -198,17 +199,17 @@ test("today's crossing is broadcast as a Target Hit, once a day", async () => {
   ]);
 });
 
-test("picks the Central-day row at 19:30 Central", async () => {
-  // 00:30Z Friday by UTC, so a UTC day (the old dashboard's) would be Friday's row.
+test("picks PostHog's UTC-day row at 19:30 Central: Friday's, as on the dashboard", async () => {
+  // 00:30Z Friday by UTC: PostHog's day, and so the board's, has already turned over.
   const at = Date.parse("2026-08-14T00:30:00Z");
   expect(new Date(at).getHours()).toBe(19);
   const ph = await posthog();
   await boot(ph, () => at);
   const { ws, messages } = await connectedDisplay(running!.port);
-  await step(ph, messages, thursdayWeek(1001));
+  await step(ph, messages, thursdayWeek(900, { 6: 1001 }), 6);
   ws.close();
-  expect(messages[0].wau.today).toBe(5);
-  expect(hits(messages)).toMatchObject([{ label: "Thursday", current: 1001, previous: 1000 }]);
+  expect(messages[0].wau.today).toBe(6);
+  expect(hits(messages)).toMatchObject([{ label: "Friday", current: 1001, previous: 1000 }]);
 });
 
 test("a boot already ahead stays quiet", async () => {
@@ -250,13 +251,14 @@ test("the next day's crossing celebrates again, against that day's last week", a
 });
 
 test("Saturday's first reading already ahead celebrates: the last reading was last week's", async () => {
-  let clock = new Date(2026, 7, 14, 23).getTime(); // Friday night, Saturday's row last week's
+  // Friday 18:00 Central, 23:00 UTC: still Friday, Saturday's row last week's.
+  let clock = new Date(2026, 7, 14, 18).getTime();
   const ph = await posthog();
   ph.live = counts([1100, 1001, 1002, 1003, 1004, 1005, 1006]);
   await boot(ph, () => clock);
   const { ws, messages } = await connectedDisplay(running!.port);
   clock = new Date(2026, 7, 15, 10).getTime(); // Saturday: a new week
-  ph.week_start = "2026-08-15T00:00:00-05:00";
+  ph.week_start = "2026-08-15T00:00:00Z";
   ph.lastWeek = counts([1000, 1001, 1002, 1003, 1004, 1005, 1006]);
   await step(ph, messages, counts([1001, 0, 0, 0, 0, 0, 0]), 0);
   ws.close();
@@ -265,9 +267,10 @@ test("Saturday's first reading already ahead celebrates: the last reading was la
 
 test("a Target Hit in Quiet Hours is flagged silent", async () => {
   const ph = await posthog();
+  // Quiet Hours are local: 22:00 Central, which is already Friday 03:00 UTC on the panel.
   await boot(ph, () => thursdayAt(22));
   const { ws, messages } = await connectedDisplay(running!.port);
-  await step(ph, messages, thursdayWeek(1001));
+  await step(ph, messages, thursdayWeek(900, { 6: 1001 }), 6);
   ws.close();
   expect(hits(messages)).toMatchObject([{ type: "wau-target-hit", audible: false }]);
 });
