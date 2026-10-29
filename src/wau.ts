@@ -1,12 +1,13 @@
-import { cycleDay, dayKey, nextMidnight, startOfDay } from "./clock.ts";
+import { cycleDay, utcDayKey, utcNextMidnight, utcStartOfDay } from "./clock.ts";
 import type { Reading } from "./monitor.ts";
 import { limitedText, retryAfterMs } from "./upstream.ts";
 
 /**
  * WUU: the WUU panel's numbers, one read of PostHog for a Monitor to run once a minute,
- * with today's Target Hit and the On Target light judged on each reading. A day is a US
- * Central day on both ends: the queries count in America/Chicago, and the Pi's clock
- * (src/clock.ts, Pi local time) picks today's row.
+ * with today's Target Hit and the On Target light judged on each reading. A day is a UTC
+ * day on both ends, the same days as PostHog's project and its dashboards: the queries
+ * count in UTC, and src/clock.ts's UTC helpers pick today's row. So the board's day
+ * starts at 7pm Central the evening before in summer (CDT) and 6pm in winter (CST).
  */
 
 const PROJECT = 196853;
@@ -21,7 +22,7 @@ const HOUR_MS = 60 * 60 * 1000;
 export const DAYS = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
 
 /**
- * One row of 8 counts: new persons per Central day of a Sat–Fri week (each person
+ * One row of 8 counts: new persons per UTC day of a Sat–Fri week (each person
  * counted on the day of their first pageview), then the week's distinct persons. One
  * row rather than a GROUP BY day, so a day with nobody new is a 0 and not a gap.
  * The bot check is the dashboard's: PostHog's `$virt_is_bot` plus one headless
@@ -30,11 +31,11 @@ export const DAYS = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Th
  * `event` sits in the same WHERE as the bot check, so ClickHouse prunes on its sort
  * key and reads the week's pageviews, not every event of the week. A ninth column
  * names the current week by its start, in both queries, so a live and a last-week row
- * read on either side of Saturday midnight can be told apart.
+ * read on either side of Saturday 00:00 UTC can be told apart.
  */
 const perDay = (since: string, until: string, extra = "") => `WITH
-  toStartOfDay(toTimeZone(now(), 'America/Chicago')) AS today_ct,
-  today_ct - toIntervalDay((toDayOfWeek(today_ct) + 1) % 7) AS week_start${extra}
+  toStartOfDay(toTimeZone(now(), 'UTC')) AS today_utc,
+  today_utc - toIntervalDay((toDayOfWeek(today_utc) + 1) % 7) AS week_start${extra}
 SELECT
   countIf(day = 0) AS sat,
   countIf(day = 1) AS sun,
@@ -46,7 +47,7 @@ SELECT
   count() AS total,
   week_start
 FROM (
-  SELECT (toDayOfWeek(toTimeZone(min(timestamp), 'America/Chicago')) + 1) % 7 AS day
+  SELECT (toDayOfWeek(toTimeZone(min(timestamp), 'UTC')) + 1) % 7 AS day
   FROM events
   WHERE event = '$pageview'
     AND timestamp >= ${since}
@@ -59,7 +60,7 @@ FROM (
 )`;
 /** This week so far: read every minute. */
 export const LIVE_QUERY = perDay("week_start", "<= now()");
-/** Last week, whole: read once per Central day. */
+/** Last week, whole: read once per UTC day. */
 export const LAST_WEEK_QUERY = perDay(
   "last_week_start",
   "< week_start",
@@ -81,15 +82,15 @@ export type Wau = {
 
 /**
  * On pace for the weekly target at `at`? The pace is flat, target ÷ 168 an hour since
- * Saturday midnight local, computed as days into the Sat–Fri cycle ÷ 7 so a DST week's
- * 167 or 169 hours is ignored: the week-to-date WUU should be target × elapsed / 7.
+ * Saturday 00:00 UTC (Friday 7pm Central in summer, 6pm in winter), computed as days into
+ * the Sat–Fri cycle ÷ 7: the week-to-date WUU should be target × elapsed / 7.
  * Green from 90% of that, yellow from 70%, red below.
- * ponytail: just after Saturday midnight `expected` is tiny, so the light swings on a
+ * ponytail: just after Saturday 00:00 UTC `expected` is tiny, so the light swings on a
  * handful of users (or ingestion lag); add a grace window if anyone watches then.
  */
 export function onTarget(currentWau: number, targetWau: number, at: number): OnTarget {
-  const day = startOfDay(at);
-  const elapsed = cycleDay(at) + (at - day) / (nextMidnight(at) - day);
+  const day = utcStartOfDay(at);
+  const elapsed = cycleDay(at) + (at - day) / (utcNextMidnight(at) - day);
   const expected = (targetWau * elapsed) / 7;
   if (expected <= 0) return "on";
   const ratio = currentWau / expected;
@@ -128,7 +129,7 @@ export const wauPayload = (reading: Reading<Wau> | undefined) =>
   reading ? { fetchedAt: reading.fetchedAt, ...reading.value, stale: reading.stale } : null;
 
 /**
- * The reader. Every read runs the live query; last week's row is read once per Central
+ * The reader. Every read runs the live query; last week's row is read once per UTC
  * day (the first read of a day, so Saturday's moves on with the week), and a read whose
  * two rows count different weeks is dropped. The target tile is read hourly and the
  * activation tile every 15 minutes, both from PostHog's cache (`force_cache`), and each
@@ -142,7 +143,7 @@ export const wauPayload = (reading: Reading<Wau> | undefined) =>
  *
  * Target Hit: today's row beating the same weekday last week, judged on each reading.
  * Crossing only, so a boot that is already ahead stays quiet, and at most once per
- * local day; a reading from an earlier day counts as behind, so the day's first one
+ * UTC day; a reading from an earlier day counts as behind, so the day's first one
  * can cross. `onTargetHit` is told today's row.
  * ponytail: a crossing while the server is down is missed, and a restart forgets the
  * day was celebrated; persist it if a second hit the same day matters.
@@ -252,9 +253,9 @@ export function wauReader({
 
   return async (): Promise<Wau> => {
     // One instant for the whole read: today's row, last week's day and the pace all
-    // agree even when the calls straddle midnight.
+    // agree even when the calls straddle UTC midnight.
     const at = now();
-    const key = dayKey(at);
+    const key = utcDayKey(at);
     warm();
     const [{ counts: live, week }, previous, targetWau, activationPercent] = await Promise.all([
       query("board-wuu-live", LIVE_QUERY),
@@ -266,13 +267,13 @@ export function wauReader({
       throw new Error("no WUU target or activation rate read yet");
     const today = cycleDay(at);
     // New persons on a day after today mean PostHog's clock is in a later day, or (just
-    // past Saturday midnight on the Pi) its week is still the last one. Either way its
+    // past Saturday 00:00 UTC on the Pi's clock) its week is still the last one. Either way its
     // rows are not the board's days, and caching its "last week" would be a week out
     // for the whole day, so this read is dropped and the next one asks again.
     if (live.slice(today + 1, 7).some((count) => count > 0))
       throw new Error("PostHog's week is not the board's: new WUU after today");
     // Each query reads PostHog's own now(), so two run side by side can land either
-    // side of Saturday midnight, one counting the week before the other's. Ask both
+    // side of Saturday 00:00 UTC, one counting the week before the other's. Ask both
     // again next time rather than keep a last week that is a week out all day.
     if (previous.week !== week) {
       lastWeek = undefined;
