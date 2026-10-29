@@ -2,6 +2,9 @@ import { expect, test } from "vitest";
 import {
   cycleDay,
   dayKey,
+  utcDayKey,
+  utcNextMidnight,
+  utcStartOfDay,
   localDate,
   msToNextMinute,
   nextMidnight,
@@ -46,13 +49,34 @@ test("localDate is zero-padded YYYY-MM-DD in local time", () => {
   expect(localDate(at(2027, 1, 1))).toBe("2027-01-01");
 });
 
-test("cycleDay counts the WUU week from Saturday=0 to Friday=6", () => {
+test("cycleDay counts the WUU week in UTC days, from Saturday=0 to Friday=6", () => {
   // 2026-10-17 is a Saturday.
-  const week = [17, 18, 19, 20, 21, 22, 23].map((d) => cycleDay(at(2026, 10, d, 12)));
+  const week = [17, 18, 19, 20, 21, 22, 23].map((d) => cycleDay(Date.UTC(2026, 9, d, 12)));
   expect(week).toEqual([0, 1, 2, 3, 4, 5, 6]);
-  // The cycle turns over at Friday's midnight.
-  expect(cycleDay(at(2026, 10, 23, 23, 59, 59, 999))).toBe(6);
-  expect(cycleDay(at(2026, 10, 24))).toBe(0);
+  // The cycle turns over at Friday's UTC midnight.
+  expect(cycleDay(Date.UTC(2026, 9, 23, 23, 59, 59, 999))).toBe(6);
+  expect(cycleDay(Date.UTC(2026, 9, 24))).toBe(0);
+});
+
+test("the WUU day turns at 00:00 UTC: 7pm Central in summer, 6pm in winter", () => {
+  // Wednesday 21 October 2026 (CDT, UTC-5): Thursday starts at 19:00 Central.
+  expect(cycleDay(Date.parse("2026-10-21T18:59:59-05:00"))).toBe(4);
+  expect(cycleDay(Date.parse("2026-10-21T19:00:00-05:00"))).toBe(5);
+  // Wednesday 4 November 2026 (CST, UTC-6): Thursday starts at 18:00 Central.
+  expect(cycleDay(Date.parse("2026-11-04T17:59:59-06:00"))).toBe(4);
+  expect(cycleDay(Date.parse("2026-11-04T18:00:00-06:00"))).toBe(5);
+  // So does the week: Saturday's row starts Friday evening Central.
+  expect(cycleDay(Date.parse("2026-10-23T19:00:00-05:00"))).toBe(0);
+});
+
+test("a UTC day is 24 hours, from its midnight to the next, even on Central's DST days", () => {
+  const evening = Date.parse("2026-11-01T20:15:00-06:00"); // 02:15Z Monday 2 November
+  expect(utcStartOfDay(evening)).toBe(Date.UTC(2026, 10, 2));
+  expect(utcNextMidnight(evening)).toBe(Date.UTC(2026, 10, 3));
+  expect(utcStartOfDay(Date.UTC(2026, 10, 2))).toBe(Date.UTC(2026, 10, 2));
+  expect(utcNextMidnight(Date.UTC(2026, 10, 2))).toBe(Date.UTC(2026, 10, 3));
+  expect(utcDayKey(evening)).toBe("2026-11-02");
+  expect(utcDayKey(Date.UTC(2026, 10, 2) - 1)).toBe("2026-11-01");
 });
 
 test("startOfWeek is Monday 00:00 of the week holding `at`", () => {
