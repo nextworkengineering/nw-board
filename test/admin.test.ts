@@ -613,7 +613,7 @@ test("a chime due while boot is still reading its upstreams still rings", async 
   const booting = startServer(port, {
     ...setup(),
     now: () => clock,
-    statusUrls: { github: url, sentry: url, gcp: url },
+    statusUrls: { github: url, sentry: url, gcp: url, claude: url, chatgpt: url },
   });
   try {
     // The board listens before it reads its upstreams, so a display can join mid-boot.

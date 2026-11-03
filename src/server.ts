@@ -23,7 +23,7 @@ import { cycleDay } from "./clock.ts";
 import { createMonitor, type Reading } from "./monitor.ts";
 import { createScheduler, dueAt } from "./scheduler.ts";
 import { createSettings, invalid, isTheme, minutesOfDay, THEMES_DIR } from "./settings.ts";
-import { statusReader, type ServiceStatus } from "./status.ts";
+import { STATUS_URLS, statusReader, type ServiceStatus } from "./status.ts";
 import { limitedText } from "./upstream.ts";
 import { wauPayload, wauReader } from "./wau.ts";
 
@@ -111,7 +111,7 @@ type Options = {
   /** How often WUU is read; tests shorten it. */
   wauIntervalMs?: number;
   /** The upstream status pages; tests point these at stubs. */
-  statusUrls?: { github?: string; sentry?: string; gcp?: string };
+  statusUrls?: Partial<typeof STATUS_URLS>;
   /** How long a Service Status read waits for each status page. */
   statusTimeoutMs?: number;
   /** How often Service Status is read; tests shorten it. */
@@ -488,7 +488,7 @@ export async function startServer(port: number, options: Options = {}) {
   //               Quiet Hours. Also sent on demand by a loopback POST
   //               /wau-target-hit, with today's row from the last reading.
   //   status:     {"type":"status","status":<Service Status>} where <Service Status> =
-  //               {"fetchedAt":<ISO>,"services":[{"name":"GITHUB"|"SENTRY"|"GCP",
+  //               {"fetchedAt":<ISO>,"services":[{"name":"GITHUB"|"SENTRY"|"GCP"|"CLAUDE"|"CHATGPT",
   //               "level":"ok"|"minor"|"major"|"unknown","text":<string>}, ...],
   //               "stale":true|false} — the status pages read once a minute, pushed only
   //               when a row or "stale" changes. fetchedAt is the last good read; stale

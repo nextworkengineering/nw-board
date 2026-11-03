@@ -729,7 +729,7 @@ const feedRows = Array.from({ length: FEED_ROWS }, (_, i) => {
 });
 
 // --------------------------------------------------------------------------------
-// Service Status: GitHub, Sentry and GCP lights, right of the Feed.
+// Service Status: GitHub, Sentry, GCP, Claude and ChatGPT lights, right of the Feed.
 // --------------------------------------------------------------------------------
 
 const statusHeader = T.decorations.headers?.status;
@@ -739,9 +739,10 @@ const STATUS_INSET = statusHeader ? 27 : 20;
 // Light-top to text-bottom of one row; the rows share the body's slack equally.
 const STATUS_ROW_H = 64;
 const statusBar = statusHeader?.bar ?? 56;
-const statusGap = (FEED_H - statusBar - 3 * STATUS_ROW_H) / 4;
+const STATUS_NAMES = ["GITHUB", "SENTRY", "GCP", "CLAUDE", "CHATGPT"];
+const statusGap = (FEED_H - statusBar - STATUS_NAMES.length * STATUS_ROW_H) / (STATUS_NAMES.length + 1);
 const STATUS_TEXT_W = 300 - 2 * STATUS_INSET;
-const statusRows = ["GITHUB", "SENTRY", "GCP"].map((name, i) => {
+const statusRows = STATUS_NAMES.map((name, i) => {
   const y = statusBar + statusGap * (i + 1) + STATUS_ROW_H * i;
   const light = new Graphics();
   light.position.set(STATUS_INSET + 16, y + 16);

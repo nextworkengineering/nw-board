@@ -1,8 +1,8 @@
 import { limitedText, retryAfterMs } from "./upstream.ts";
 
 /**
- * Service Status: one read of the GitHub, Sentry and GCP status pages, for a Monitor to
- * run once a minute. Each service fails on its own: one status page down shows that
+ * Service Status: one read of the GitHub, Sentry, GCP, Claude and OpenAI status pages,
+ * for a Monitor to run once a minute. Each service fails on its own: one status page down shows that
  * row UNAVAILABLE, not a failed read.
  */
 
@@ -10,6 +10,8 @@ export const STATUS_URLS = {
   github: "https://www.githubstatus.com/api/v2/status.json",
   sentry: "https://status.sentry.io/api/v2/status.json",
   gcp: "https://status.cloud.google.com/incidents.json",
+  claude: "https://status.claude.com/api/v2/status.json",
+  chatgpt: "https://status.openai.com/api/v2/status.json",
 };
 // Cloud Run, Google Cloud Storage, Cloud Firestore — the GCP products we run on.
 const GCP_PRODUCTS = ["9D7d2iNBQWN24zc1VamE", "UwaYoXQ5bHYHG6EdiPB8", "CETSkT92V21G6A1x28me"];
@@ -20,7 +22,7 @@ const GCP_SEVERITY = ["low", "medium", "high"];
 export type StatusLevel = "ok" | "minor" | "major" | "unknown";
 export type ServiceStatus = { services: { name: string; level: StatusLevel; text: string }[] };
 
-/** A Statuspage summary (GitHub, Sentry). Maintenance counts as minor, not ok. */
+/** A Statuspage summary (GitHub, Sentry, Claude, OpenAI). Maintenance counts as minor, not ok. */
 export function normalizeStatuspage(payload: any): { level: StatusLevel; text: string } {
   const { indicator, description } = payload?.status ?? {};
   if (typeof indicator !== "string" || typeof description !== "string")
@@ -65,7 +67,7 @@ export function normalizeGcpIncidents(payload: any): { level: StatusLevel; text:
  * The reader. Destinations are fixed (tests point `urls` at stubs). A 429 is the one
  * failure that fails the whole read, carrying its Retry-After, so the Monitor backs off
  * and keeps the last good reading rather than asking again in a minute.
- * ponytail: one page rate-limiting holds all three rows at the last good reading; back
+ * ponytail: one page rate-limiting holds every row at the last good reading; back
  * off per service if one page ever rate-limits on its own.
  */
 export function statusReader({
@@ -76,6 +78,8 @@ export function statusReader({
     { name: "GITHUB", url: urls.github ?? STATUS_URLS.github, normalize: normalizeStatuspage },
     { name: "SENTRY", url: urls.sentry ?? STATUS_URLS.sentry, normalize: normalizeStatuspage },
     { name: "GCP", url: urls.gcp ?? STATUS_URLS.gcp, normalize: normalizeGcpIncidents },
+    { name: "CLAUDE", url: urls.claude ?? STATUS_URLS.claude, normalize: normalizeStatuspage },
+    { name: "CHATGPT", url: urls.chatgpt ?? STATUS_URLS.chatgpt, normalize: normalizeStatuspage },
   ];
   const get = async (url: string) => {
     const response = await fetch(url, {

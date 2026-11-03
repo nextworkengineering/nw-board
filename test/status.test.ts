@@ -31,7 +31,7 @@ const CLOUD_RUN = "9D7d2iNBQWN24zc1VamE";
 const NOW = new Date(2026, 9, 20, 9, 0).getTime();
 // A loopback read with a gap since the last one can take ~0.5 s here (keep-alive reuse).
 const PATIENCE = { timeout: 4_000 };
-const ALL_OK = ["GITHUB", "SENTRY", "GCP"].map((name) => ({ name, level: "ok", text: "OPERATIONAL" }));
+const ALL_OK = ["GITHUB", "SENTRY", "GCP", "CLAUDE", "CHATGPT"].map((name) => ({ name, level: "ok", text: "OPERATIONAL" }));
 
 // Service Status is read once at boot and then every statusIntervalMs (a minute unless a
 // test shortens it); /status.json and the displays get that reading, not a fresh call.
@@ -49,6 +49,8 @@ test("the status route serves the cached reading: every service operational", as
       res.end(JSON.stringify({ status: { indicator: "none", description: "All Systems Operational" } }));
     }),
     sentry: await statuspage("none", "All Systems Operational"),
+    claude: await statuspage("none", "All Systems Operational"),
+    chatgpt: await statuspage("none", "All Systems Operational"),
     gcp: await json([]),
   });
 
@@ -68,6 +70,8 @@ test.for([
   const { body } = await readStatus({
     github: await statuspage(indicator, "Partial System Outage"),
     sentry: await statuspage("none", "All Systems Operational"),
+    claude: await statuspage("none", "All Systems Operational"),
+    chatgpt: await statuspage("none", "All Systems Operational"),
     gcp: await json([]),
   });
 
@@ -96,6 +100,8 @@ test("GCP counts only open incidents on our products that reach our regions", as
   const urls = {
     github: await statuspage("none", "All Systems Operational"),
     sentry: await statuspage("none", "All Systems Operational"),
+    claude: await statuspage("none", "All Systems Operational"),
+    chatgpt: await statuspage("none", "All Systems Operational"),
   };
   const quiet = await readStatus({ ...urls, gcp: await json(ignored) });
   expect(quiet.body.services[2]).toEqual({
@@ -127,10 +133,12 @@ test("one failing status page shows only its row unavailable", async () => {
       res.end(JSON.stringify({ status: { indicator: "none", description: "fine" } }));
     }),
     gcp: await json([]),
+    claude: await statuspage("none", "All Systems Operational"),
+    chatgpt: await statuspage("none", "All Systems Operational"),
   });
 
   expect(response.status).toBe(200);
-  expect(body.services.map((service: any) => service.level)).toEqual(["ok", "unknown", "ok"]);
+  expect(body.services.map((service: any) => service.level)).toEqual(["ok", "unknown", "ok", "ok", "ok"]);
   expect(body.services[1]).toEqual({ name: "SENTRY", level: "unknown", text: "UNAVAILABLE" });
 });
 
@@ -139,6 +147,10 @@ test("a stalled status page times out to unavailable", async () => {
     {
       github: await statuspage("none", "All Systems Operational"),
       sentry: await statuspage("none", "All Systems Operational"),
+      claude: await statuspage("none", "All Systems Operational"),
+      chatgpt: await statuspage("none", "All Systems Operational"),
+    claude: await statuspage("none", "All Systems Operational"),
+    chatgpt: await statuspage("none", "All Systems Operational"),
       gcp: await upstream(async (_req, res) => {
         await sleep(100);
         res.end("[]");
@@ -163,6 +175,10 @@ test("status is pushed over the websocket", async () => {
         res.end(JSON.stringify({ status: { indicator, description: "Partial System Outage" } }));
       }),
       sentry: await statuspage("none", "All Systems Operational"),
+      claude: await statuspage("none", "All Systems Operational"),
+      chatgpt: await statuspage("none", "All Systems Operational"),
+    claude: await statuspage("none", "All Systems Operational"),
+    chatgpt: await statuspage("none", "All Systems Operational"),
       gcp: await json([]),
     },
   });
@@ -200,7 +216,13 @@ test("snapshot carries the status, stale for a display connecting mid-outage", a
     configPath,
     now: () => now,
     statusIntervalMs: 20,
-    statusUrls: { github: await page(operational), sentry: await page(operational), gcp: await page([]) },
+    statusUrls: {
+      github: await page(operational),
+      sentry: await page(operational),
+      gcp: await page([]),
+      claude: await page(operational),
+      chatgpt: await page(operational),
+    },
   });
   const fresh = { fetchedAt: new Date(NOW).toISOString(), services: ALL_OK, stale: false };
   expect((await readSnapshot(running.port)).status).toEqual(fresh);
