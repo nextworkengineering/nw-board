@@ -290,7 +290,7 @@ test("a display connecting receives a snapshot of the Feed reflecting earlier ev
     // A test reaches no status page, so every row reads UNAVAILABLE, fresh at boot.
     status: {
       fetchedAt: new Date(IN_THE_SOUND_WINDOW).toISOString(),
-      services: ["GITHUB", "SENTRY", "GCP"].map((name) => ({
+      services: ["GITHUB", "SENTRY", "GCP", "CLAUDE", "CHATGPT"].map((name) => ({
         name,
         level: "unknown",
         text: "UNAVAILABLE",
