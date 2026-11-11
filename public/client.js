@@ -64,9 +64,8 @@ const face = (name, fontSize, em = 0, extra) =>
 // themes keep the full-width board.
 const SHADOW = T.decorations.hardShadow ?? 0;
 const PANEL_W = SHADOW ? 1864 : 1872;
-// The Feed gives up its right-hand 632px to the Review Queue and Status panels:
-// 300 wide each, 16 apart.
-const FEED_W = PANEL_W - 632;
+// The Feed gives up its right-hand 316px to the Status panel: 300 wide, 16 apart.
+const FEED_W = PANEL_W - 316;
 const chips = T.decorations.chips;
 
 const EVENTS = {
@@ -733,7 +732,7 @@ const feedRows = Array.from({ length: FEED_ROWS }, (_, i) => {
 // --------------------------------------------------------------------------------
 
 const statusHeader = T.decorations.headers?.status;
-const statusPanel = panel(24 + FEED_W + 332, 204, 300, FEED_H, "STATUS", C.ink, statusHeader);
+const statusPanel = panel(24 + FEED_W + 16, 204, 300, FEED_H, "STATUS", C.ink, statusHeader);
 // Neobrutal: Paper's 27px inset, like the heading; elsewhere the heading's 20.
 const STATUS_INSET = statusHeader ? 27 : 20;
 // Light-top to text-bottom of one row; the rows share the body's slack equally.
@@ -805,72 +804,6 @@ function renderStatus(data) {
     if (T.decorations.stats) light.stroke({ width: T.decorations.stats.outline, color: C.ink, alignment: 1 });
     text.style.fill = service ? STATUS_INK[level] : C.dim;
     setStatusText(row, service ? String(service.text) : "CHECKING…");
-  }
-}
-
-// --------------------------------------------------------------------------------
-// Review Queue: each configured reviewer's requested reviews, between the Feed and
-// Status.
-// --------------------------------------------------------------------------------
-
-const reviewHeader = T.decorations.headers?.reviews;
-const reviewPanel = panel(24 + FEED_W + 16, 204, 300, FEED_H, "REVIEW QUEUE", C.ink, reviewHeader);
-const reviewBar = reviewHeader?.bar ?? 56;
-const reviewBody = new Container();
-reviewPanel.addChild(reviewBody);
-
-/**
- * PR numbers greedily onto at most two lines of `text`; whatever doesn't fit is
- * counted as `+N`, bumping PRs off the second line until the count fits too.
- */
-function wrapPrs(text, prs) {
-  const fits = (line) => {
-    text.text = line.join("  ");
-    return text.width <= STATUS_TEXT_W;
-  };
-  const lines = [[], []];
-  let shown = 0;
-  for (const line of lines)
-    while (shown < prs.length && (!line.length || fits([...line, `#${prs[shown]}`])))
-      line.push(`#${prs[shown++]}`);
-  if (shown < prs.length) {
-    while (!fits([...lines[1], `+${prs.length - shown}`])) {
-      lines[1].pop();
-      shown--;
-    }
-    lines[1].push(`+${prs.length - shown}`);
-  }
-  text.text = lines.filter((line) => line.length).map((line) => line.join("  ")).join("\n");
-}
-
-let reviewKey = "";
-/** [{reviewer, prs}] from the snapshot: a block per reviewer with PRs waiting, stacked from the top. */
-function renderReviews(queue) {
-  // Rebuilt only when it changed, like the ticker: every snapshot carries it.
-  const key = JSON.stringify(queue);
-  if (key === reviewKey) return;
-  reviewKey = key;
-  for (const old of reviewBody.removeChildren()) old.destroy({ children: true });
-  const waiting = (queue ?? []).filter(({ prs }) => prs.length);
-  // null: the server hasn't read GitHub yet, so it can't vouch for ALL CLEAR.
-  if (!waiting.length) {
-    const note = label(queue ? "ALL CLEAR" : "CHECKING…", 28, C.dim, face("ui", 28, 0, { lineHeight: 34 }));
-    note.position.set(STATUS_INSET, reviewBar + 24);
-    reviewBody.addChild(note);
-    return;
-  }
-  let y = reviewBar + 24;
-  for (const { reviewer, prs } of waiting) {
-    const block = new Container();
-    const name = label("", 30, C.ink, face("display", 30, -0.01));
-    fitText(name, String(reviewer).toUpperCase(), STATUS_TEXT_W);
-    const list = label("", 28, C.ink, face("ui", 28, 0, { lineHeight: 34 }));
-    list.y = name.height + 8;
-    wrapPrs(list, prs);
-    block.addChild(name, list);
-    block.position.set(STATUS_INSET, y);
-    reviewBody.addChild(block);
-    y += Math.round(block.height) + 32;
   }
 }
 
@@ -2354,7 +2287,6 @@ function handleMessage(data) {
     setDevDeploy(data.devDeploy);
     renderWau(data.wau);
     renderStatus(data.status);
-    renderReviews(data.reviewQueue ?? null);
   } else {
     feed.push(stamp(data));
     if (CELEBRATIONS.has(data.type)) celebrate(data.type, data, Boolean(data.audible));
@@ -2398,7 +2330,6 @@ connect();
 renderFeed();
 renderWau(null);
 renderStatus(null);
-renderReviews(null);
 renderHeadlines([]);
 void loadHeadlines();
 setInterval(() => void loadHeadlines(), NEWS_REFRESH_MS);
@@ -2424,7 +2355,6 @@ stage.playHeld();
 //   arcade.setStatus({fetchedAt, services:[{name:"GITHUB", level:"minor", text:"..."}]})
 //     / arcade.setStatus(null) — Status panel lights, (data, true) for stale
 //   (with the socket down both panels draw stale whatever you pass)
-//   arcade.setReviews([{reviewer:"Maximus", prs:[812, 815]}]) — Review Queue panel
 //   arcade.setHeadlines(["A very important AI headline"]) — bottom news ticker
 //   ?theme=arcade — load in a theme from public/themes (arcade is the pre-reskin
 //     look a Target Hit puts on until midnight); the server's snapshot `theme`
@@ -2478,7 +2408,6 @@ window.arcade = {
   setDevDeploy,
   setWau: (data = sampleWau, stale = false) => renderWau(data && { ...data, stale }),
   setStatus: (data, stale = false) => renderStatus(data && { ...data, stale }),
-  setReviews: renderReviews,
   setHeadlines: renderHeadlines,
   event: handleMessage,
   demo() {

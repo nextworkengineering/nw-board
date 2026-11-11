@@ -153,12 +153,6 @@ export async function startServer(port: number, options: Options = {}) {
       `${configPath}: devDeployWorkflow must be a workflow file name, e.g. "env-dev.yaml"`,
     );
 
-  // Review Queue reviewers: the GitHub logins whose requested reviews the board lists.
-  // Optional and boot-only (the Admin Console does not edit it); none means no queue.
-  const reviewers: string[] = config.reviewers ?? [];
-  if (!Array.isArray(reviewers) || reviewers.some((reviewer) => typeof reviewer !== "string"))
-    throw new Error(`${configPath}: reviewers must be a list of GitHub logins`);
-
   // Optional because existing Pi installs keep config.json across deploys. A missing
   // URL leaves the news route disabled until the operator adds one and restarts.
   let newsFeedUrl: URL | undefined;
@@ -276,26 +270,15 @@ export async function startServer(port: number, options: Options = {}) {
   /**
    * Record what a Backfill or Reconcile read, in one batch so the displays get one
    * snapshot for all of it. Returns how many events were new and whether In Dev moved.
-   * `queueBefore` is the Review Queue (as JSON) from before the read: one that moved
-   * with nothing else is pushed too.
    */
-  const recordFound = (
-    happenings: Happening[],
-    runs: { repo: string; run: any }[],
-    queueBefore: string,
-  ) => {
-    const found = board.batch(() => {
+  const recordFound = (happenings: Happening[], runs: { repo: string; run: any }[]) =>
+    board.batch(() => {
       let recovered = 0;
       let devMoved = false;
       for (const { at, event } of happenings) if (board.record(event, at)) recovered++;
       for (const { repo, run } of runs) if (recordDevDeploy(repo, run)) devMoved = true;
       return { recovered, devMoved };
     });
-    // Either of those already pushed a snapshot, which carries the queue.
-    if (!found.recovered && !found.devMoved && JSON.stringify(reviewQueue()) !== queueBefore)
-      pushSnapshot();
-    return found;
-  };
 
   const app = express();
 
@@ -440,8 +423,7 @@ export async function startServer(port: number, options: Options = {}) {
   //                "mvp":{"names":[<string>, ...],"count":<number>}|null,
   //                "devDeploy":{"actor":<string>,"at":<ms>,"repo":<string>,"run":<number>}|null,
   //                "theme":<string>, "sounds":{"<slot>":"sounds/<path>.mp3", ...},
-  //                "status":<Service Status>|null, "wau":<WUU>|null,
-  //                "reviewQueue":[{"reviewer":<string>,"prs":[<number>, ...]}, ...]|null}
+  //                "status":<Service Status>|null, "wau":<WUU>|null}
   //               feed is oldest first and holds the last 24h, each entry stamped with
   //               the server time it happened; mvp names all Actors tied for today's
   //               lead, null until today has an event; devDeploy is the last teammate
@@ -455,12 +437,8 @@ export async function startServer(port: number, options: Options = {}) {
   //               assigned to a Sound Library clip, so the board plays it instead of the
   //               slot's default — an unassigned slot is absent; status and wau are
   //               the last Service Status and WUU readings, each null until its first
-  //               read lands (wau stays null without a PostHog credential), as below;
-  //               reviewQueue has one entry per configured reviewer, in config order and
-  //               even when it is empty, naming the open non-draft PRs (numbers ascending, across
-  //               every Tracked Repo) that ask that reviewer for a review — reviewer is
-  //               the display name, else the login; null until the first open-PR read
-  //               lands. Each change is pushed as a fresh snapshot.
+  //               read lands (wau stays null without a PostHog credential), as below.
+  //               Each change is pushed as a fresh snapshot.
   //   live:       <domain event> = {"type":"pr-merged"|..., repo, number, title, actor}
   //               actor is the display name of whoever did it (the merger for a
   //               pr-merged, the reviewer for a review, the commenter for a comment):
@@ -506,32 +484,6 @@ export async function startServer(port: number, options: Options = {}) {
   //               PostHog credential, 502 before the first reading).
   // No domain event type is called "snapshot", "day-chime", "wau-target-hit", "reminder",
   // "scheduled-celebration", "status" or "wau", so `type` tells them apart.
-  // Review Queue: each Tracked Repo's requested reviews from its last good open-PR read,
-  // so a repo whose read fails keeps what it last showed. Logins are kept and named
-  // on read, because names are live-editable.
-  // ponytail: poll-only, so a new or withdrawn request shows up to reconcileMs late;
-  // review_requested webhooks are ignored. Handle them if that lag ever matters.
-  const reviewRequests = new Map<string, { login: string; number: number }[]>();
-  const noteReviewRequests = (repo: string, open: any[]) =>
-    reviewRequests.set(
-      repo,
-      // A draft is not ready for review, whoever GitHub has down as asked.
-      open.filter((pr) => !pr.draft).flatMap((pr) =>
-        (pr.requested_reviewers ?? []).map((who: any) => ({ login: login(who), number: pr.number })),
-      ),
-    );
-  const reviewQueue = () => {
-    // Nothing read yet (booting, or no GITHUB_TOKEN) is unknown, not ALL CLEAR.
-    if (!reviewRequests.size) return null;
-    const requests = [...reviewRequests.values()].flat();
-    const names = settings.current().names;
-    return reviewers.map((reviewer) => ({
-      reviewer: Object.hasOwn(names, reviewer) ? names[reviewer]! : reviewer,
-      prs: [...new Set(requests.filter((r) => r.login === reviewer).map((r) => r.number))].sort(
-        (a, b) => a - b,
-      ),
-    }));
-  };
   const broadcast = (message: unknown) => {
     for (const client of wss.clients) client.send(JSON.stringify(message));
   };
@@ -543,7 +495,6 @@ export async function startServer(port: number, options: Options = {}) {
     ),
     status: statusBody(),
     wau: wauPayload(wauMonitor?.current()),
-    reviewQueue: reviewQueue(),
   });
   wss.on("connection", (socket) => socket.send(JSON.stringify(snapshot())));
   // The one snapshot push: whatever changed, the displays get the whole board again.
@@ -614,7 +565,7 @@ export async function startServer(port: number, options: Options = {}) {
     return (await response.json()) as any;
   };
 
-  const history = createHistory({ get, now, repos: trackedRepos, onOpen: noteReviewRequests });
+  const history = createHistory({ get, now, repos: trackedRepos });
 
   /**
    * Backfill: rebuild the Feed from the GitHub API so a fresh boot is never blank and
@@ -629,12 +580,11 @@ export async function startServer(port: number, options: Options = {}) {
       );
       return;
     }
-    const queueBefore = JSON.stringify(reviewQueue());
     const entries = await history.backfill();
     // The last dev deploy is state, not a Feed entry, so a restart has to refetch it
     // or the header sits blank until the next deploy.
     const runs = await devDeployRuns("Backfill");
-    recordFound(entries, runs, queueBefore);
+    recordFound(entries, runs);
     // Say what was chosen: a stale header is otherwise undiagnosable from the journal.
     if (devDeployWorkflow) console.log(`Backfill: ${describeDevDeploy()}`);
   }
@@ -651,16 +601,11 @@ export async function startServer(port: number, options: Options = {}) {
     if (!token || reconciling) return;
     reconciling = true;
     try {
-      const queueBefore = JSON.stringify(reviewQueue());
       const happenings = await history.reconcile();
       // The header is state, not an event, so a lost workflow_run delivery leaves no
       // PR to notice; the runs list is the only place it can be repaired from.
       // Not counted as a recovered event: In Dev is board state, not an event.
-      const { recovered, devMoved } = recordFound(
-        happenings,
-        await devDeployRuns("Reconcile"),
-        queueBefore,
-      );
+      const { recovered, devMoved } = recordFound(happenings, await devDeployRuns("Reconcile"));
       if (devMoved) console.log(`reconcile: ${describeDevDeploy()}`);
       if (recovered)
         console.log(`reconcile: recovered ${recovered} missed event${recovered === 1 ? "" : "s"}`);
